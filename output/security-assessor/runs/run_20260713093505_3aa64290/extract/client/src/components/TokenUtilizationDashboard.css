@@ -1,0 +1,740 @@
+/* ─── MuleSoft-Inspired Token Utilization Dashboard ────────────────────────── */
+
+/* Root */
+.tud-root {
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  background: #f4f6f9;
+  min-height: 100vh;
+  padding: 0 0 32px;
+  color: #1A1A1A;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────────────── */
+.tud-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #fff;
+  border-bottom: 3px solid #FF6B00;
+  padding: 16px 28px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.07);
+}
+
+.tud-header-left {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.tud-ms-logo {
+  flex-shrink: 0;
+}
+
+.tud-title {
+  font-size: 1.35rem;
+  font-weight: 800;
+  color: #1A1A1A;
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+.tud-subtitle {
+  font-size: 0.78rem;
+  color: #777;
+  margin: 2px 0 0;
+}
+
+.tud-header-badge {
+  background: #FF6B00;
+  color: #fff;
+  font-size: 0.68rem;
+  font-weight: 800;
+  padding: 3px 8px;
+  border-radius: 20px;
+  letter-spacing: 0.06em;
+  animation: pulse-live 2s ease-in-out infinite;
+}
+
+@keyframes pulse-live {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.65; }
+}
+
+.tud-header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.tud-last-updated {
+  font-size: 0.8rem;
+  color: #888;
+}
+
+.tud-refresh-btn {
+  padding: 7px 14px;
+  background: #FF6B00;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.tud-refresh-btn:hover { background: #E65100; }
+
+/* ── Inline warning ──────────────────────────────────────────────────────────── */
+.tud-inline-warn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: #FFF3CD;
+  border-left: 4px solid #F5A623;
+  padding: 10px 16px;
+  font-size: 0.85rem;
+  color: #856404;
+}
+.tud-inline-warn button {
+  padding: 4px 10px;
+  font-size: 0.78rem;
+  background: #F5A623;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+/* ── KPI Stat Cards ──────────────────────────────────────────────────────────── */
+.tud-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 16px;
+  padding: 20px 28px 8px;
+}
+
+.tud-stat-card {
+  background: #fff;
+  border-radius: 12px;
+  padding: 16px 20px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.07);
+  border-top: 3px solid var(--card-accent, #FF6B00);
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.tud-stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.1);
+}
+
+.tud-stat-icon-wrap {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.tud-stat-icon { font-size: 1.4rem; }
+
+.tud-stat-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.tud-stat-label {
+  font-size: 0.73rem;
+  color: #888;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.tud-stat-value {
+  font-size: 1.5rem;
+  font-weight: 800;
+  color: #1A1A1A;
+  line-height: 1.1;
+}
+
+.tud-stat-sub {
+  font-size: 0.73rem;
+  color: #999;
+  margin-top: 2px;
+}
+
+.tud-stat-trend {
+  font-size: 0.73rem;
+  font-weight: 700;
+  margin-top: 2px;
+}
+.tud-stat-trend.up { color: #059669; }
+.tud-stat-trend.down { color: #DC2626; }
+
+/* ── Controls ────────────────────────────────────────────────────────────────── */
+.tud-controls {
+  background: #fff;
+  border-radius: 12px;
+  margin: 12px 28px;
+  padding: 16px 20px;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.07);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.tud-control-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: flex-end;
+}
+
+.tud-control-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tud-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #555;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.tud-pill-group {
+  display: flex;
+  gap: 4px;
+}
+
+.tud-pill {
+  padding: 5px 12px;
+  border: 1px solid #d1d5db;
+  background: #f9fafb;
+  color: #555;
+  border-radius: 20px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.tud-pill.active {
+  background: #FF6B00;
+  border-color: #FF6B00;
+  color: #fff;
+}
+
+.tud-pill:hover:not(.active) {
+  border-color: #FF6B00;
+  color: #FF6B00;
+}
+
+.tud-select {
+  padding: 6px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 0.83rem;
+  background: #fff;
+  color: #333;
+  cursor: pointer;
+  min-width: 140px;
+}
+
+.tud-select:focus {
+  outline: none;
+  border-color: #FF6B00;
+}
+
+.tud-input {
+  padding: 6px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 0.83rem;
+  background: #fff;
+  color: #333;
+  min-width: 160px;
+}
+
+.tud-input:focus {
+  outline: none;
+  border-color: #FF6B00;
+  box-shadow: 0 0 0 2px rgba(255,107,0,0.15);
+}
+
+.tud-view-toggle {
+  display: flex;
+  gap: 8px;
+  align-self: flex-end;
+}
+
+.tud-view-btn {
+  padding: 7px 16px;
+  border: 1px solid #d1d5db;
+  background: #f9fafb;
+  color: #555;
+  border-radius: 8px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.tud-view-btn.active {
+  background: #FF6B00;
+  border-color: #FF6B00;
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(255,107,0,0.3);
+}
+
+/* ── Overview Grid (Charts) ──────────────────────────────────────────────────── */
+.tud-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+  padding: 0 28px;
+}
+
+.tud-chart-card {
+  background: #fff;
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.07);
+}
+
+.tud-chart-title {
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: #374151;
+  margin: 0 0 16px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 2px solid #f3f4f6;
+  padding-bottom: 10px;
+}
+
+.tud-chart-empty {
+  font-size: 0.82rem;
+  color: #999;
+  padding: 24px 0;
+  text-align: center;
+}
+
+/* Donut */
+.tud-donut-wrap {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.tud-donut-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tud-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8rem;
+}
+
+.tud-legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.tud-legend-label {
+  color: #555;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 110px;
+}
+
+.tud-legend-val {
+  font-weight: 700;
+  color: #1A1A1A;
+  font-size: 0.78rem;
+  margin-left: auto;
+}
+
+/* Provider list */
+.tud-provider-list {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tud-prov-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tud-prov-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.tud-prov-badge {
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid;
+  letter-spacing: 0.04em;
+}
+
+.tud-prov-stats {
+  display: flex;
+  gap: 10px;
+  font-size: 0.75rem;
+  color: #777;
+}
+
+.tud-prov-errors { color: #DC2626; font-weight: 700; }
+.tud-prov-tokens { color: #FF8F00; font-weight: 600; }
+
+.tud-bar-track {
+  height: 6px;
+  background: #f3f4f6;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.tud-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.6s ease;
+  min-width: 4px;
+}
+
+/* Model list */
+.tud-model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tud-model-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tud-model-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tud-model-rank {
+  font-size: 0.72rem;
+  font-weight: 800;
+  padding: 2px 7px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.tud-model-name {
+  font-size: 0.8rem;
+  color: #333;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tud-model-count {
+  font-size: 0.75rem;
+  color: #888;
+  font-weight: 600;
+}
+
+/* Status breakdown */
+.tud-status-grid {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-top: 8px;
+}
+
+.tud-status-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 14px 20px;
+  border-radius: 10px;
+  min-width: 80px;
+}
+
+.tud-status-success { background: #d1fae5; color: #065f46; }
+.tud-status-error   { background: #fee2e2; color: #991b1b; }
+.tud-status-unknown { background: #f3f4f6; color: #6b7280; }
+
+.tud-status-count {
+  font-size: 1.8rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.tud-status-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  margin-top: 4px;
+  letter-spacing: 0.04em;
+}
+
+/* ── Table ───────────────────────────────────────────────────────────────────── */
+.tud-table-section {
+  padding: 0 28px;
+}
+
+.tud-table-info {
+  font-size: 0.82rem;
+  color: #666;
+  padding: 10px 0 8px;
+}
+
+.tud-no-data-block {
+  background: #fff;
+  border-radius: 10px;
+  padding: 28px;
+  text-align: center;
+  color: #999;
+  font-size: 0.9rem;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.06);
+}
+
+.tud-table-wrap {
+  background: #fff;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.07);
+  overflow-x: auto;
+}
+
+.tud-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.tud-table thead {
+  background: #f8fafc;
+  border-bottom: 2px solid #e5e7eb;
+}
+
+.tud-table th {
+  padding: 10px 12px;
+  text-align: left;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.tud-table th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.tud-table th.sortable:hover { color: #FF6B00; }
+.tud-table th.numeric { text-align: right; }
+
+.tud-tr {
+  border-bottom: 1px solid #f3f4f6;
+  transition: background 0.15s;
+  cursor: pointer;
+}
+
+.tud-tr:hover { background: #f8fafc; }
+.tud-tr-expanded { background: #f0f9ff; }
+.tud-tr-error { background: #fff8f8; }
+
+.tud-table td {
+  padding: 9px 12px;
+  vertical-align: middle;
+  color: #374151;
+}
+
+.tud-table td.numeric { text-align: right; font-variant-numeric: tabular-nums; }
+.tud-total { font-weight: 700; color: #FF6B00; }
+.tud-td-ts { font-size: 0.75rem; color: #888; white-space: nowrap; }
+.tud-td-model { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.78rem; }
+.tud-td-err { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.75rem; color: #e55; }
+
+.tud-prov-chip {
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 4px;
+  border: 1px solid;
+  white-space: nowrap;
+}
+
+.tud-status-badge {
+  font-size: 0.73rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.tud-status-badge-success { color: #059669; }
+.tud-status-badge-error { color: #DC2626; }
+
+.tud-expanded-row td {
+  padding: 0 12px 10px;
+}
+
+.tud-error-detail {
+  background: #fef2f2;
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-size: 0.8rem;
+  color: #991b1b;
+}
+
+.tud-error-detail pre {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 0.75rem;
+}
+
+/* ── Pagination ─────────────────────────────────────────────────────────────── */
+.tud-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 14px;
+  border-top: 1px solid #f3f4f6;
+}
+
+.tud-page-btn {
+  padding: 6px 14px;
+  border: 1px solid #d1d5db;
+  background: #fff;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  color: #555;
+  transition: all 0.2s;
+}
+
+.tud-page-btn:hover:not(:disabled) {
+  border-color: #FF6B00;
+  color: #FF6B00;
+}
+
+.tud-page-btn:disabled { opacity: 0.4; cursor: default; }
+.tud-page-info { font-size: 0.82rem; color: #666; }
+
+/* ── Footer ──────────────────────────────────────────────────────────────────── */
+.tud-footer {
+  display: flex;
+  justify-content: space-between;
+  padding: 14px 28px 0;
+  font-size: 0.75rem;
+  color: #aaa;
+}
+
+.tud-footer code {
+  background: #f3f4f6;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 0.72rem;
+}
+
+/* ── Misc ────────────────────────────────────────────────────────────────────── */
+.tud-no-data {
+  color: #bbb;
+  font-size: 0.82rem;
+  text-align: center;
+  padding: 18px 0;
+}
+
+.tud-spinner-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 60px;
+  color: #888;
+  font-size: 0.9rem;
+}
+
+.tud-spinner {
+  width: 36px;
+  height: 36px;
+  border: 3px solid #e5e7eb;
+  border-top-color: #FF6B00;
+  border-radius: 50%;
+  animation: tud-spin 0.8s linear infinite;
+}
+
+@keyframes tud-spin {
+  to { transform: rotate(360deg); }
+}
+
+.tud-error-wrap {
+  text-align: center;
+  padding: 60px 28px;
+  max-width: 460px;
+  margin: 0 auto;
+}
+
+.tud-error-icon { font-size: 2.5rem; margin-bottom: 12px; }
+
+.tud-error-wrap h3 {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #DC2626;
+  margin: 0 0 8px;
+}
+
+.tud-error-hint {
+  font-size: 0.82rem;
+  color: #888;
+  margin-top: 8px;
+}
+
+.tud-error-hint code {
+  background: #f3f4f6;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.tud-retry-btn {
+  margin-top: 16px;
+  padding: 8px 20px;
+  background: #FF6B00;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-weight: 600;
+  cursor: pointer;
+}
+

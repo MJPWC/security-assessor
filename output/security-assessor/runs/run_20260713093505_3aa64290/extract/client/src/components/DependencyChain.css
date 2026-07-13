@@ -1,0 +1,215 @@
+.dependency-chain {
+  background: #ffffff;
+  padding: 24px;
+  border-radius: 16px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.07);
+  border: 1px solid #efefef;
+  border-top: 3px solid #FF6B00;
+  animation: slideIn 0.6s ease-out;
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateX(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.dependency-chain h2 {
+  margin-bottom: 16px;
+  color: #FF6B00;
+  font-size: 1.3rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  letter-spacing: -0.01em;
+}
+
+.chain-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+.chain-step {
+  background: linear-gradient(135deg, #f8f9fa 0%, #ffffff 100%);
+  border: 2px solid #e9ecef;
+  border-radius: 16px;
+  padding: 16px 22px;
+  min-width: 220px;
+  text-align: center;
+  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+}
+
+.chain-step::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 4px;
+  background: linear-gradient(90deg, #FF6B00, #FF8F00);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.4s ease;
+}
+
+.chain-step:hover {
+  transform: translateY(-4px) scale(1.02);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  border-color: #FF6B00;
+}
+
+.chain-step:hover::before {
+  transform: scaleX(1);
+}
+
+.chain-step.completed {
+  background: linear-gradient(135deg, #e8f5e9 0%, #c8e6c9 100%);
+  border-color: #66bb6a;
+  box-shadow: 
+    0 4px 16px rgba(76, 175, 80, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  animation: completedPulse 2s ease-in-out infinite;
+}
+
+@keyframes completedPulse {
+  0%, 100% {
+    box-shadow: 
+      0 4px 16px rgba(76, 175, 80, 0.3),
+      inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  }
+  50% {
+    box-shadow: 
+      0 6px 20px rgba(76, 175, 80, 0.4),
+      inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  }
+}
+
+.chain-step.completed::before {
+  background: linear-gradient(90deg, #66bb6a, #4caf50);
+  transform: scaleX(1);
+}
+
+.chain-step.working {
+  background: linear-gradient(135deg, #fff3e0 0%, #ffe0b2 100%);
+  border-color: #ffa726;
+  box-shadow: 
+    0 4px 16px rgba(255, 167, 38, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  animation: workingPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes workingPulse {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 
+      0 4px 16px rgba(255, 167, 38, 0.3),
+      inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  }
+  50% {
+    transform: scale(1.03);
+    box-shadow: 
+      0 6px 20px rgba(255, 167, 38, 0.4),
+      inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  }
+}
+
+.chain-step.working::before {
+  background: linear-gradient(90deg, #ffa726, #ff9800);
+  transform: scaleX(1);
+  animation: progressBar 2s ease-in-out infinite;
+}
+
+@keyframes progressBar {
+  0% {
+    transform: scaleX(0);
+  }
+  50% {
+    transform: scaleX(0.7);
+  }
+  100% {
+    transform: scaleX(1);
+  }
+}
+
+.step-icon {
+  font-size: 2.5rem;
+  margin-bottom: 12px;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.1));
+  animation: iconFloat 3s ease-in-out infinite;
+}
+
+@keyframes iconFloat {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-5px);
+  }
+}
+
+.step-name {
+  font-weight: 700;
+  color: #1a1a1a;
+  margin-bottom: 8px;
+  font-size: 1.1rem;
+  letter-spacing: -0.01em;
+}
+
+.step-status {
+  font-size: 0.8rem;
+  color: #6c757d;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+.step-deps {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 2px solid rgba(0, 0, 0, 0.06);
+}
+
+.step-deps small {
+  color: #9ca3af;
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+.chain-arrow {
+  font-size: 2rem;
+  color: #d1d5db;
+  transition: all 0.4s ease;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.1));
+}
+
+.chain-arrow.active {
+  color: #66bb6a;
+  animation: arrowBounce 1.2s ease-in-out infinite;
+  filter: drop-shadow(0 4px 8px rgba(76, 175, 80, 0.3));
+}
+
+@keyframes arrowBounce {
+  0%, 100% {
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    transform: translateY(-8px) scale(1.1);
+  }
+}
+
+.chain-arrow:hover {
+  color: #FF6B00;
+  transform: scale(1.2);
+}

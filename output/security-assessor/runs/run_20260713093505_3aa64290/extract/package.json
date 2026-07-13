@@ -1,0 +1,68 @@
+{
+  "name": "mulesoft-multi-agent",
+  "version": "1.0.0",
+  "description": "Multi-agent system for MuleSoft architecture, diagrams, estimation, and RAML generation",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server/index.js",
+    "test:guardrails": "node test-guardrails.js",
+    "test:topology": "node test-topology-xml-normalization.js",
+    "server": "node server/index.js",
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "client": "cd client && npm start",
+    "build": "cd client && npm install && npm run build",
+    "build:client": "cd client && npm run build",
+    "start:prod": "npm run build:client && npm start",
+    "test:request-budget": "node test-request-budget.js",
+    "test:tool-policy": "node test-tool-policy.js",
+    "test:session-access": "node test-session-access.js",
+    "test:llm-fallback-security": "node test-llm-fallback-security.js",
+    "test:log-safety": "node test-log-safety.js",
+    "test:artifacts": "node test-artifact-validation.js",
+    "test:auth": "node test-auth.js",
+    "test:security-headers": "node test-security-headers.js",
+    "test:secure-store": "node test-secure-store.js",
+    "security:secrets": "node scripts/scan-secrets.js",
+    "security:audit": "npm audit --omit=dev --audit-level=high && npm audit --prefix client --omit=dev --audit-level=high",
+    "security:sbom:root": "npx --yes @cyclonedx/cyclonedx-npm --package-lock-only --ignore-npm-errors --output-file output/sbom-root.json",
+    "security:sbom:client": "cd client && npx --yes @cyclonedx/cyclonedx-npm --package-lock-only --ignore-npm-errors --output-file ../output/sbom-client.json",
+    "security:sbom": "npm run security:sbom:root && npm run security:sbom:client",
+    "security:report": "node outputs/security-checks/merged-security-workbook/build-merged-security-report.mjs",
+    "security:test": "npm run test:guardrails && npm run test:request-budget && npm run test:tool-policy && npm run test:session-access && npm run test:llm-fallback-security && npm run test:log-safety && npm run test:artifacts && npm run test:auth && npm run test:security-headers && npm run test:secure-store && npm run security:secrets && npm run security:audit",
+    "security:check": "npm run security:test && npm run security:sbom && npm run security:report"
+  },
+  "keywords": [
+    "mulesoft",
+    "llm",
+    "chatgpt",
+    "openai",
+    "agent",
+    "ai",
+    "raml",
+    "architecture"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.22.0",
+    "archiver": "^7.0.1",
+    "axios": "^1.7.7",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "exceljs": "^4.4.0",
+    "express": "^4.22.2",
+    "fast-xml-parser": "^5.9.3",
+    "fs-extra": "^11.1.1",
+    "node-fetch": "^3.3.2",
+    "openai": "^4.20.0",
+    "pdf-parse": "^1.1.1",
+    "socket.io": "^4.6.1"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
+  }
+}

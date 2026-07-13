@@ -268,29 +268,73 @@ def collect_dependency_inventory(files, extract_dir, findings):
     return components
 
 
+def find_npm_audit_targets(extract_dir):
+    targets = []
+    for current, dirs, names in os.walk(extract_dir):
+        dirs[:] = [
+            name for name in dirs
+            if name not in {"node_modules", ".git", "dist", "build", "coverage"}
+        ]
+        current_path = Path(current)
+        if "package.json" in names and "package-lock.json" in names:
+            targets.append(current_path)
+    return targets
+
+
 def run_npm_audit_if_possible(extract_dir, findings):
-    if not (extract_dir / "package.json").exists() or not (extract_dir / "package-lock.json").exists():
-        return {"attempted": False, "reason": "package-lock.json and package.json not found at artifact root"}
-    try:
-        result = subprocess.run(
-            ["npm", "audit", "--omit=dev", "--json", "--package-lock-only"],
-            cwd=extract_dir,
-            text=True,
-            capture_output=True,
-            timeout=60,
-        )
-        data = json.loads(result.stdout or "{}")
-        vulnerabilities = data.get("vulnerabilities") or {}
-        for name, vuln in vulnerabilities.items():
-            severity = vuln.get("severity") if vuln.get("severity") in SEVERITY_RANK else "medium"
-            add_finding(findings, severity, "Known vulnerability scan", f"npm audit reported {vuln.get('severity', 'a')} vulnerability for {name}.", {
-                "package": name,
-                "fixAvailable": vuln.get("fixAvailable"),
+    targets = find_npm_audit_targets(extract_dir)
+    if not targets:
+        return {"attempted": False, "targets": [], "reason": "No package.json + package-lock.json pairs found"}
+
+    results = []
+    total_vulnerabilities = 0
+    attempted = False
+
+    for target in targets:
+        attempted = True
+        rel_target = "." if target == extract_dir else str(target.relative_to(extract_dir))
+        target_vulnerabilities = 0
+        target_ok = False
+        error_message = None
+        try:
+            result = subprocess.run(
+                ["npm", "audit", "--omit=dev", "--json", "--package-lock-only"],
+                cwd=target,
+                text=True,
+                capture_output=True,
+                timeout=60,
+            )
+            data = json.loads(result.stdout or "{}")
+            vulnerabilities = data.get("vulnerabilities") or {}
+            target_vulnerabilities = len(vulnerabilities)
+            total_vulnerabilities += target_vulnerabilities
+            target_ok = True
+            for name, vuln in vulnerabilities.items():
+                severity = vuln.get("severity") if vuln.get("severity") in SEVERITY_RANK else "medium"
+                add_finding(findings, severity, "Known vulnerability scan", f"npm audit reported {vuln.get('severity', 'a')} vulnerability for {name}.", {
+                    "package": name,
+                    "project": rel_target,
+                    "fixAvailable": vuln.get("fixAvailable"),
+                })
+        except Exception as exc:
+            error_message = str(exc)
+            add_finding(findings, "medium", "Known vulnerability scan", "npm audit did not return parseable output.", {
+                "project": rel_target,
+                "error": error_message,
             })
-        return {"attempted": True, "ok": True, "vulnerabilityCount": len(vulnerabilities)}
-    except Exception as exc:
-        add_finding(findings, "medium", "Known vulnerability scan", "npm audit did not return parseable output.", {"error": str(exc)})
-        return {"attempted": True, "ok": False}
+
+        results.append({
+            "project": rel_target,
+            "ok": target_ok,
+            "vulnerabilityCount": target_vulnerabilities,
+            "error": error_message,
+        })
+
+    return {
+        "attempted": attempted,
+        "targets": results,
+        "vulnerabilityCount": total_vulnerabilities,
+    }
 
 
 def decision_for(findings):
@@ -431,7 +475,7 @@ def build_markdown_report(assessment):
         f"| Archive path safety | Blocks path traversal entries before extraction. | {'Completed' if assessment['archive']['extracted'] else 'Completed with limitation'} |",
         "| Secret scanning | Checks text files for hardcoded keys, tokens, private keys, credentialed URLs, and sensitive assignments. | Completed |",
         "| Dependency inventory | Extracts npm, Python, Maven, manifest, and nested JAR component evidence where present. | Completed |",
-        f"| Known vulnerability scan | Runs npm audit when a root package-lock.json is available. | {'Completed' if assessment['npmAudit']['attempted'] else 'Not applicable'} |",
+        f"| Known vulnerability scan | Runs npm audit for every package.json + package-lock.json pair found, including nested client apps. | {'Completed' if assessment['npmAudit']['attempted'] else 'Not applicable'} |",
         "| SBOM generation | Generates a CycloneDX-lite JSON dependency inventory. | Completed |",
         "| LLM security review | Sends only redacted findings metadata to the configured backend LLM. | Completed |",
         "",
@@ -451,6 +495,20 @@ def build_markdown_report(assessment):
             lines.append(f"- {item['task']}: {item['details']}")
             if item["evidence"]:
                 lines.append(f"  Evidence: `{json.dumps(item['evidence'])}`")
+    lines.extend([
+        "",
+        "## npm Audit Targets",
+        "",
+        "| Project | Status | Vulnerabilities |",
+        "| --- | --- | ---: |",
+    ])
+    audit_targets = assessment["npmAudit"].get("targets") or []
+    if audit_targets:
+        for target in audit_targets:
+            status = "Completed" if target.get("ok") else "Failed"
+            lines.append(f"| {target.get('project', '.')} | {status} | {target.get('vulnerabilityCount', 0)} |")
+    else:
+        lines.append(f"| Not applicable | {assessment['npmAudit'].get('reason', 'No npm audit targets found')} | 0 |")
     lines.extend([
         "",
         "## Dependency Inventory",
