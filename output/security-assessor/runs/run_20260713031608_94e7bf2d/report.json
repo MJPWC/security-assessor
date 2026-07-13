@@ -1,0 +1,58 @@
+{
+  "runId": "run_20260713031608_94e7bf2d",
+  "generatedAt": "2026-07-13T03:16:08.566503+00:00",
+  "artifact": {
+    "fileName": "requirements.txt",
+    "originalFileName": "requirements.txt",
+    "type": "unknown",
+    "sizeBytes": 148,
+    "sha256": "1422c1d5f7609bf58f3b87afe560c1d6028f7b19bea262ea09f607d635bff24b"
+  },
+  "archive": {
+    "extracted": true,
+    "entries": [
+      "requirements.txt"
+    ]
+  },
+  "secretScan": "[REDACTED_SECRET]",
+  "npmAudit": {
+    "attempted": false,
+    "reason": "package-lock.json and package.json not found at artifact root"
+  },
+  "components": [],
+  "findings": [
+    {
+      "id": "dependency-inventory-1",
+      "severity": "low",
+      "task": "Dependency inventory",
+      "details": "No dependency manifest was found in the uploaded artifact.",
+      "evidence": {}
+    }
+  ],
+  "findingCounts": {
+    "low": 1
+  },
+  "decision": "Approved for dev deployment",
+  "sbom": {
+    "bomFormat": "CycloneDX-lite",
+    "specVersion": "1.5",
+    "serialNumber": "urn:uuid:968d72f2-9d72-4818-a0be-e8e0b6f30994",
+    "metadata": {
+      "timestamp": "2026-07-13T03:16:08.566526+00:00",
+      "component": {
+        "type": "application",
+        "name": "requirements.txt",
+        "version": "uploaded-artifact",
+        "hashes": [
+          {
+            "alg": "SHA-256",
+            "content": "1422c1d5f7609bf58f3b87afe560c1d6028f7b19bea262ea09f607d635bff24b"
+          }
+        ]
+      }
+    },
+    "components": []
+  },
+  "llmReview": "LLM review unavailable: LLM request failed for all configured providers. ",
+  "reportMarkdown": "# Package Security Assessment Report\n\nRun ID: run_20260713031608_94e7bf2d\nGenerated: 2026-07-13T03:16:08.566503+00:00\nDecision: Approved for dev deployment\n\n## Artifact\n\n- File: requirements.txt\n- Type: unknown\n- Size: 148 bytes\n- SHA-256: 1422c1d5f7609bf58f3b87afe560c1d6028f7b19bea262ea09f607d635bff24b\n\n## Checks Performed\n\n| Security Test Task | Details | Status |\n| --- | --- | --- |\n| Archive path safety | Blocks path traversal entries before extraction. | Completed |\n| Secret scanning | Checks text files for hardcoded keys, tokens, private keys, credentialed URLs, and sensitive assignments. | Completed |\n| Dependency inventory | Extracts npm, Python, Maven, manifest, and nested JAR component evidence where present. | Completed |\n| Known vulnerability scan | Runs npm audit when a root package-lock.json is available. | Not applicable |\n| SBOM generation | Generates a CycloneDX-lite JSON dependency inventory. | Completed |\n| LLM security review | Sends only redacted findings metadata to the configured backend LLM. | Completed |\n\n## Finding Summary\n\n| Severity | Count |\n| --- | ---: |\n| critical | 0 |\n| high | 0 |\n| medium | 0 |\n| low | 1 |\n| info | 0 |\n\n## Low Findings\n\n- Dependency inventory: No dependency manifest was found in the uploaded artifact.\n\n## Dependency Inventory\n\nTotal components found: 0\n\n| Ecosystem | Name | Version | Source |\n| --- | --- | --- | --- |\n\n## LLM Review\n\nLLM review unavailable: LLM request failed for all configured providers. \n\n## Deployment Recommendation\n\nNo blocking issue was found by the automated checks. Use normal environment-specific validation before release.\n\n## Evidence Files\n\n- JSON report: report.json\n- SBOM: sbom.json"
+}

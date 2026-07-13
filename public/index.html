@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Package Security Assessor</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #17202a;
+        --muted: #637083;
+        --line: #d8dee8;
+        --panel: #f7f9fc;
+        --accent: #146c94;
+        --ok: #1c7c54;
+        --warn: #a15c00;
+        --bad: #b42318;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: var(--ink);
+        background: #ffffff;
+      }
+      header {
+        padding: 22px 28px;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 18px;
+      }
+      h1 {
+        margin: 0;
+        font-size: 22px;
+        font-weight: 720;
+        letter-spacing: 0;
+      }
+      main {
+        padding: 24px 28px 34px;
+        display: grid;
+        grid-template-columns: minmax(280px, 380px) minmax(0, 1fr);
+        gap: 24px;
+      }
+      section {
+        min-width: 0;
+      }
+      .panel {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #fff;
+        padding: 18px;
+      }
+      .stack { display: grid; gap: 14px; }
+      label {
+        display: block;
+        font-size: 13px;
+        font-weight: 650;
+        margin-bottom: 8px;
+      }
+      input[type="file"] {
+        width: 100%;
+        padding: 12px;
+        border: 1px dashed #9ca9ba;
+        border-radius: 8px;
+        background: var(--panel);
+      }
+      button {
+        width: 100%;
+        border: 0;
+        border-radius: 8px;
+        background: var(--accent);
+        color: #fff;
+        padding: 11px 14px;
+        font-size: 14px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.58;
+        cursor: not-allowed;
+      }
+      .status {
+        min-height: 42px;
+        border-radius: 8px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        padding: 11px 12px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+      .summary {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+      }
+      .metric {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 12px;
+        background: var(--panel);
+      }
+      .metric b {
+        display: block;
+        font-size: 22px;
+        line-height: 1;
+      }
+      .metric span {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .decision {
+        display: inline-flex;
+        align-items: center;
+        min-height: 32px;
+        padding: 6px 10px;
+        border-radius: 8px;
+        border: 1px solid var(--line);
+        font-weight: 720;
+      }
+      .decision.approved { color: var(--ok); }
+      .decision.conditional { color: var(--warn); }
+      .decision.blocked { color: var(--bad); }
+      pre {
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        background: #0f1720;
+        color: #e8edf5;
+        border-radius: 8px;
+        padding: 16px;
+        max-height: 68vh;
+        overflow: auto;
+      }
+      a {
+        color: var(--accent);
+        font-weight: 650;
+      }
+      .links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        font-size: 14px;
+      }
+      @media (max-width: 860px) {
+        main { grid-template-columns: 1fr; padding: 18px; }
+        header { padding: 18px; align-items: flex-start; flex-direction: column; }
+        .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Package Security Assessor</h1>
+      <div class="decision" id="decision">No assessment yet</div>
+    </header>
+    <main>
+      <section class="panel stack">
+        <div>
+          <label for="artifact">Upload application package</label>
+          <input id="artifact" type="file" accept=".jar,.war,.zip,.tgz,.tar,.gz,.whl,.py,.js,.json">
+        </div>
+        <button id="scan">Run Security Assessment</button>
+        <div class="status" id="status">Select a Node.js, Python, JAR, WAR, ZIP, TAR, TGZ, or wheel package.</div>
+        <div class="summary">
+          <div class="metric"><b id="critical">0</b><span>Critical</span></div>
+          <div class="metric"><b id="high">0</b><span>High</span></div>
+          <div class="metric"><b id="medium">0</b><span>Medium</span></div>
+          <div class="metric"><b id="low">0</b><span>Low</span></div>
+        </div>
+        <div class="links" id="links"></div>
+      </section>
+      <section class="stack">
+        <pre id="report">Assessment report will appear here after the scan completes.</pre>
+      </section>
+    </main>
+    <script>
+      const fileInput = document.getElementById('artifact');
+      const scanButton = document.getElementById('scan');
+      const statusEl = document.getElementById('status');
+      const reportEl = document.getElementById('report');
+      const linksEl = document.getElementById('links');
+      const decisionEl = document.getElementById('decision');
+      const counters = {
+        critical: document.getElementById('critical'),
+        high: document.getElementById('high'),
+        medium: document.getElementById('medium'),
+        low: document.getElementById('low')
+      };
+
+      function setStatus(message) {
+        statusEl.textContent = message;
+      }
+
+      function setDecision(value) {
+        decisionEl.textContent = value || 'No assessment yet';
+        decisionEl.className = 'decision';
+        const lower = String(value || '').toLowerCase();
+        if (lower.includes('approved') && !lower.includes('conditional')) decisionEl.classList.add('approved');
+        if (lower.includes('conditional')) decisionEl.classList.add('conditional');
+        if (lower.includes('blocked')) decisionEl.classList.add('blocked');
+      }
+
+      function arrayBufferToBase64(buffer) {
+        const bytes = new Uint8Array(buffer);
+        const chunkSize = 0x8000;
+        let binary = '';
+        for (let i = 0; i < bytes.length; i += chunkSize) {
+          binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+        }
+        return btoa(binary);
+      }
+
+      function renderLinks(runId) {
+        if (!runId) {
+          linksEl.innerHTML = '';
+          return;
+        }
+        linksEl.innerHTML = [
+          `<a href="/api/reports/${runId}/report.md" target="_blank" rel="noreferrer">Markdown report</a>`,
+          `<a href="/api/reports/${runId}/report.json" target="_blank" rel="noreferrer">JSON report</a>`,
+          `<a href="/api/reports/${runId}/sbom.json" target="_blank" rel="noreferrer">SBOM</a>`
+        ].join('');
+      }
+
+      scanButton.addEventListener('click', async () => {
+        const file = fileInput.files && fileInput.files[0];
+        if (!file) {
+          setStatus('Please select a package first.');
+          return;
+        }
+        scanButton.disabled = true;
+        reportEl.textContent = 'Scanning package...';
+        renderLinks();
+        setDecision('Running');
+        Object.values(counters).forEach(el => { el.textContent = '0'; });
+        try {
+          setStatus('Reading upload in browser...');
+          const contentBase64 = arrayBufferToBase64(await file.arrayBuffer());
+          setStatus('Uploading and running checks...');
+          const response = await fetch('/api/assess', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fileName: file.name, contentBase64 })
+          });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.error || 'Assessment failed.');
+          setDecision(payload.decision);
+          for (const key of Object.keys(counters)) {
+            counters[key].textContent = payload.findingCounts?.[key] || 0;
+          }
+          reportEl.textContent = payload.reportMarkdown || 'Report was generated without Markdown content.';
+          renderLinks(payload.runId);
+          setStatus(`Completed run ${payload.runId}. Components found: ${payload.componentCount}.`);
+        } catch (error) {
+          setDecision('Failed');
+          reportEl.textContent = error.message;
+          setStatus('Assessment failed. Check the selected package and try again.');
+        } finally {
+          scanButton.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>
