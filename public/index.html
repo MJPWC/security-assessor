@@ -97,6 +97,74 @@
         border-radius: 4px;
         background: var(--panel);
       }
+      input[type="text"],
+      input[type="number"],
+      select,
+      textarea {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        background: #fff;
+        color: var(--ink);
+        padding: 9px 10px;
+        font-family: inherit;
+        font-size: 13px;
+        line-height: 1.4;
+      }
+      textarea {
+        min-height: 76px;
+        resize: vertical;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      .runtime-toggle {
+        display: flex;
+        align-items: flex-start;
+        gap: 9px;
+        padding: 11px;
+        border: 1px solid var(--line);
+        border-left: 4px solid var(--accent-dark);
+        border-radius: 4px;
+        background: var(--panel);
+      }
+      .runtime-toggle input {
+        margin-top: 2px;
+      }
+      .runtime-toggle strong {
+        display: block;
+        font-size: 13px;
+      }
+      .runtime-toggle span {
+        display: block;
+        margin-top: 2px;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.35;
+      }
+      .runtime-config {
+        display: none;
+        gap: 10px;
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        background: #fff;
+      }
+      .runtime-config.active {
+        display: grid;
+      }
+      .field-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+      .field-full {
+        grid-column: 1 / -1;
+      }
+      .hint {
+        margin-top: 5px;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.35;
+      }
       button {
         width: 100%;
         border: 0;
@@ -176,6 +244,86 @@
         max-height: 68vh;
         overflow: auto;
       }
+      .report-view {
+        display: grid;
+        gap: 14px;
+      }
+      .report-empty {
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        background: #fff;
+        color: var(--muted);
+        padding: 18px;
+      }
+      .report-card {
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        background: #fff;
+        overflow: hidden;
+      }
+      .report-card h2 {
+        margin: 0;
+        padding: 11px 13px;
+        background: var(--charcoal);
+        color: #fff;
+        font-size: 14px;
+        letter-spacing: 0;
+      }
+      .report-card .card-body {
+        padding: 13px;
+      }
+      .kv {
+        display: grid;
+        grid-template-columns: minmax(120px, 180px) minmax(0, 1fr);
+        gap: 8px 12px;
+        font-size: 13px;
+      }
+      .kv dt {
+        color: var(--muted);
+        font-weight: 700;
+      }
+      .kv dd {
+        margin: 0;
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
+      .table-wrap {
+        overflow: auto;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+      }
+      th {
+        background: var(--panel);
+        color: var(--ink);
+        text-align: left;
+        font-weight: 750;
+      }
+      th,
+      td {
+        border-bottom: 1px solid var(--line);
+        padding: 9px 10px;
+        vertical-align: top;
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        min-height: 24px;
+        padding: 3px 8px;
+        border-radius: 999px;
+        background: var(--panel);
+        font-size: 12px;
+        font-weight: 750;
+      }
+      .pill.pass { color: var(--ok); }
+      .pill.fail,
+      .pill.critical,
+      .pill.high { color: var(--bad); }
+      .pill.medium { color: var(--warn); }
+      .pill.low,
+      .pill.info { color: var(--muted); }
       a {
         color: var(--accent);
         font-weight: 650;
@@ -213,6 +361,7 @@
         main { grid-template-columns: 1fr; padding: 18px; }
         .header-inner { padding: 18px; align-items: flex-start; flex-direction: column; }
         .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .field-grid { grid-template-columns: 1fr; }
       }
     </style>
   </head>
@@ -235,6 +384,71 @@
           <label for="artifact">Upload application package</label>
           <input id="artifact" type="file" accept=".jar,.war,.zip,.tgz,.tar,.gz,.whl,.py,.js,.json">
         </div>
+        <label class="runtime-toggle" for="runtime-enabled">
+          <input id="runtime-enabled" type="checkbox">
+          <span>
+            <strong>Run Docker guardrail tests</strong>
+            <span>Starts the uploaded artifact in a temporary Docker container, sends restricted prompts, then removes the container.</span>
+          </span>
+        </label>
+        <div class="runtime-config" id="runtime-config">
+          <div class="field-grid">
+            <div>
+              <label for="runtime-image">Docker image</label>
+              <input id="runtime-image" type="text" value="node:20">
+              <div class="hint">Use `eclipse-temurin:17` for a runnable JAR.</div>
+            </div>
+            <div>
+              <label for="runtime-port">App port in container</label>
+              <input id="runtime-port" type="number" min="1" max="65535" value="5001">
+            </div>
+            <div class="field-full">
+              <label for="runtime-command">Start command</label>
+              <input id="runtime-command" type="text" value="npm start">
+              <div class="hint">For JARs: `java -jar /artifact/your-file.jar`. For TARs: command runs from `/app`.</div>
+            </div>
+            <div>
+              <label for="runtime-health">Health path</label>
+              <input id="runtime-health" type="text" value="/health">
+            </div>
+            <div>
+              <label for="runtime-endpoint">Prompt endpoint</label>
+              <input id="runtime-endpoint" type="text" value="/api/chat">
+            </div>
+            <div>
+              <label for="runtime-method">Method</label>
+              <select id="runtime-method">
+                <option>POST</option>
+                <option>PUT</option>
+              </select>
+            </div>
+            <div>
+              <label for="runtime-timeout">Startup timeout</label>
+              <input id="runtime-timeout" type="number" min="5" max="180" value="45">
+            </div>
+            <div class="field-full">
+              <label for="runtime-body">Request body template</label>
+              <textarea id="runtime-body">{"message":"{{prompt}}"}</textarea>
+            </div>
+            <div class="field-full">
+              <label for="runtime-headers">Headers</label>
+              <textarea id="runtime-headers" placeholder="Authorization: Bearer token"></textarea>
+            </div>
+            <div class="field-full">
+              <label for="runtime-env">Container environment</label>
+              <textarea id="runtime-env" placeholder="OPENAI_API_KEY=...
+LLM_PROVIDER=openai"></textarea>
+            </div>
+            <div class="field-full">
+              <label for="runtime-signals">Expected block signals</label>
+              <textarea id="runtime-signals">blocked
+warning
+not allowed
+restricted
+policy</textarea>
+            </div>
+          </div>
+        </div>
         <button id="scan">Run Security Assessment</button>
         <div class="status" id="status">Select a Node.js, Python, JAR, WAR, ZIP, TAR, TGZ, or wheel package.</div>
         <div class="summary">
@@ -246,7 +460,9 @@
         <div class="links" id="links"></div>
       </section>
       <section class="stack">
-        <pre id="report">Assessment report will appear here after the scan completes.</pre>
+        <div id="report" class="report-view">
+          <div class="report-empty">Assessment report will appear here after the scan completes.</div>
+        </div>
       </section>
     </main>
     <script>
@@ -256,6 +472,21 @@
       const reportEl = document.getElementById('report');
       const linksEl = document.getElementById('links');
       const decisionEl = document.getElementById('decision');
+      const runtimeEnabledEl = document.getElementById('runtime-enabled');
+      const runtimeConfigEl = document.getElementById('runtime-config');
+      const runtimeFields = {
+        image: document.getElementById('runtime-image'),
+        startCommand: document.getElementById('runtime-command'),
+        appPort: document.getElementById('runtime-port'),
+        healthPath: document.getElementById('runtime-health'),
+        promptEndpoint: document.getElementById('runtime-endpoint'),
+        method: document.getElementById('runtime-method'),
+        startupTimeoutSeconds: document.getElementById('runtime-timeout'),
+        requestBodyTemplate: document.getElementById('runtime-body'),
+        headers: document.getElementById('runtime-headers'),
+        env: document.getElementById('runtime-env'),
+        expectedBlockSignals: document.getElementById('runtime-signals')
+      };
       const counters = {
         critical: document.getElementById('critical'),
         high: document.getElementById('high'),
@@ -292,11 +523,118 @@
           return;
         }
         linksEl.innerHTML = [
+          `<a href="/api/reports/${runId}/report.xlsx" download="security-assessment-${runId}.xlsx">Excel report</a>`,
           `<a href="/api/reports/${runId}/report.md" download="security-assessment-${runId}.md">Markdown report</a>`,
           `<a href="/api/reports/${runId}/report.json" download="security-assessment-${runId}.json">JSON report</a>`,
           `<a href="/api/reports/${runId}/sbom.json" download="security-assessment-sbom-${runId}.json">SBOM</a>`
         ].join('');
       }
+
+      function escapeHtml(value) {
+        return String(value ?? '').replace(/[&<>"']/g, char => ({
+          '&': '&amp;',
+          '<': '&lt;',
+          '>': '&gt;',
+          '"': '&quot;',
+          "'": '&#39;'
+        }[char]));
+      }
+
+      function pill(value, extra = '') {
+        return `<span class="pill ${extra || String(value || '').toLowerCase()}">${escapeHtml(value)}</span>`;
+      }
+
+      function renderTable(headers, rows, emptyText) {
+        if (!rows || rows.length === 0) return `<div class="card-body">${escapeHtml(emptyText)}</div>`;
+        return `<div class="table-wrap"><table><thead><tr>${headers.map(h => `<th>${escapeHtml(h)}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table></div>`;
+      }
+
+      function renderReport(payload) {
+        const counts = payload.findingCounts || {};
+        const findings = payload.findings || [];
+        const runtime = payload.runtime || {};
+        const components = payload.components || [];
+        const runtimeRows = (runtime.tests || []).map(test => `
+          <tr>
+            <td>${escapeHtml(test.name)}</td>
+            <td>${pill(test.passed ? 'Pass' : 'Fail', test.passed ? 'pass' : 'fail')}</td>
+            <td>${escapeHtml(test.status || '')}</td>
+            <td>${escapeHtml(test.reason || '')}</td>
+          </tr>`);
+        const findingRows = findings.map(item => `
+          <tr>
+            <td>${pill(item.severity, item.severity)}</td>
+            <td>${escapeHtml(item.task)}</td>
+            <td>${escapeHtml(item.details)}</td>
+          </tr>`);
+        const componentRows = components.slice(0, 25).map(item => `
+          <tr>
+            <td>${escapeHtml(item.ecosystem)}</td>
+            <td>${escapeHtml(item.name)}</td>
+            <td>${escapeHtml(item.version)}</td>
+          </tr>`);
+        reportEl.innerHTML = `
+          <section class="report-card">
+            <h2>Assessment Summary</h2>
+            <div class="card-body">
+              <dl class="kv">
+                <dt>Run ID</dt><dd>${escapeHtml(payload.runId)}</dd>
+                <dt>Decision</dt><dd>${pill(payload.decision || 'Unknown')}</dd>
+                <dt>Components</dt><dd>${escapeHtml(payload.componentCount || 0)}</dd>
+                <dt>Findings</dt><dd>Critical ${counts.critical || 0} · High ${counts.high || 0} · Medium ${counts.medium || 0} · Low ${counts.low || 0}</dd>
+                <dt>Runtime tests</dt><dd>${runtime.attempted ? `${runtime.failureCount || 0} failures` : 'Not enabled'}</dd>
+              </dl>
+            </div>
+          </section>
+          <section class="report-card">
+            <h2>Findings</h2>
+            ${renderTable(['Severity', 'Task', 'Details'], findingRows, 'No findings were reported.')}
+          </section>
+          <section class="report-card">
+            <h2>Runtime Guardrail Tests</h2>
+            ${runtime.attempted ? renderTable(['Test', 'Result', 'HTTP', 'Reason'], runtimeRows, 'No runtime tests were executed.') : '<div class="card-body">Docker runtime guardrail tests were not enabled for this scan.</div>'}
+          </section>
+          <section class="report-card">
+            <h2>Dependency Sample</h2>
+            ${renderTable(['Ecosystem', 'Name', 'Version'], componentRows, 'No dependency components were found.')}
+          </section>
+        `;
+      }
+
+      function runtimeConfig() {
+        return {
+          enabled: runtimeEnabledEl.checked,
+          image: runtimeFields.image.value.trim(),
+          startCommand: runtimeFields.startCommand.value.trim(),
+          appPort: Number(runtimeFields.appPort.value || 8080),
+          healthPath: runtimeFields.healthPath.value.trim(),
+          promptEndpoint: runtimeFields.promptEndpoint.value.trim(),
+          method: runtimeFields.method.value,
+          startupTimeoutSeconds: Number(runtimeFields.startupTimeoutSeconds.value || 45),
+          requestBodyTemplate: runtimeFields.requestBodyTemplate.value,
+          headers: runtimeFields.headers.value,
+          env: runtimeFields.env.value,
+          expectedBlockSignals: runtimeFields.expectedBlockSignals.value
+        };
+      }
+
+      runtimeEnabledEl.addEventListener('change', () => {
+        runtimeConfigEl.classList.toggle('active', runtimeEnabledEl.checked);
+      });
+
+      fileInput.addEventListener('change', () => {
+        const file = fileInput.files && fileInput.files[0];
+        const name = String(file?.name || '').toLowerCase();
+        if (name.endsWith('.jar') || name.endsWith('.war')) {
+          runtimeFields.image.value = 'eclipse-temurin:17';
+          runtimeFields.startCommand.value = file ? `java -jar /artifact/${file.name.replace(/[^A-Za-z0-9._-]/g, '_')}` : 'java -jar /artifact/app.jar';
+          runtimeFields.appPort.value = '8080';
+        } else if (name.endsWith('.tar') || name.endsWith('.tgz') || name.endsWith('.tar.gz')) {
+          runtimeFields.image.value = 'node:20';
+          runtimeFields.startCommand.value = 'npm start';
+          runtimeFields.appPort.value = '5001';
+        }
+      });
 
       scanButton.addEventListener('click', async () => {
         const file = fileInput.files && fileInput.files[0];
@@ -305,18 +643,18 @@
           return;
         }
         scanButton.disabled = true;
-        reportEl.textContent = 'Scanning package...';
+        reportEl.innerHTML = '<div class="report-empty">Scanning package...</div>';
         renderLinks();
         setDecision('Running');
         Object.values(counters).forEach(el => { el.textContent = '0'; });
         try {
           setStatus('Reading upload in browser...');
           const contentBase64 = arrayBufferToBase64(await file.arrayBuffer());
-          setStatus('Uploading and running checks...');
+          setStatus(runtimeEnabledEl.checked ? 'Uploading, scanning, and starting Docker sandbox...' : 'Uploading and running checks...');
           const response = await fetch('/api/assess', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ fileName: file.name, contentBase64 })
+            body: JSON.stringify({ fileName: file.name, contentBase64, runtimeConfig: runtimeConfig() })
           });
           const payload = await response.json();
           if (!response.ok) throw new Error(payload.error || 'Assessment failed.');
@@ -324,12 +662,13 @@
           for (const key of Object.keys(counters)) {
             counters[key].textContent = payload.findingCounts?.[key] || 0;
           }
-          reportEl.textContent = payload.reportMarkdown || 'Report was generated without Markdown content.';
+          renderReport(payload);
           renderLinks(payload.runId);
-          setStatus(`Completed run ${payload.runId}. Components found: ${payload.componentCount}.`);
+          const runtimeText = payload.runtime?.attempted ? ` Runtime tests: ${payload.runtime.failureCount || 0} failures.` : '';
+          setStatus(`Completed run ${payload.runId}. Components found: ${payload.componentCount}.${runtimeText}`);
         } catch (error) {
           setDecision('Failed');
-          reportEl.textContent = error.message;
+          reportEl.innerHTML = `<div class="report-empty">${escapeHtml(error.message)}</div>`;
           setStatus('Assessment failed. Check the selected package and try again.');
         } finally {
           scanButton.disabled = false;
