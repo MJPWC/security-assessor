@@ -33,31 +33,23 @@
    - Include artifact hash and dependency components.
    - Save as `sbom.json`.
 
-7. Docker runtime sandbox test
-   - Optionally run uploaded artifact inside Docker.
-   - Configure Docker image, start command, app port, health path, endpoint, headers, and environment.
-   - Mount uploaded artifact and extracted app read-only.
-   - Apply CPU, memory, process, and security limits.
-   - Stop and remove container after test.
+7. Certificate and TLS artifact review
+   - Detect packaged certificate, keystore, and private key files.
+   - Parse X.509 certificate metadata where OpenSSL can read the file.
+   - Flag expired certificates, soon-expiring certificates, weak signatures, and packaged private keys.
 
-8. Runtime guardrail validation
-   - Send restricted or malicious prompts to the running app.
-   - Test system prompt extraction, guardrail bypass, secret extraction, tool abuse, unsafe code generation, and indirect prompt injection.
-   - Check for expected block signals such as `blocked`, `warning`, `not allowed`, `restricted`, and `policy`.
-   - Mark failures as findings.
-
-9. LLM security review
+8. LLM security review
    - Send only redacted assessment metadata to configured LLM provider.
    - Get concise risk review and deployment recommendation.
    - Do not send raw uploaded package content.
 
-10. Decision engine
+9. Decision engine
     - Critical finding: `Blocked`
     - High finding: `Blocked pending security review`
     - Medium finding: `Conditional approval`
     - Low/no major issue: `Approved for dev deployment`
 
-11. Report generation
+10. Report generation
     - Generate readable on-screen summary.
     - Generate Markdown report.
     - Generate JSON report.
@@ -73,9 +65,7 @@
 - Dependency inventory.
 - Nested npm audit support.
 - CycloneDX-lite SBOM.
-- Optional Docker runtime sandbox execution.
-- Runtime LLM guardrail prompt tests.
-- Docker logs and evidence capture.
+- Certificate, keystore, and private key checks.
 - LLM-based security review when API keys are configured.
 - Markdown, JSON, Excel, and SBOM downloads.
 - Readable UI summary.
@@ -86,6 +76,9 @@
 - Python package CVE scanning.
 - Full SAST.
 - Full DAST crawling.
+- VirtualBox-based runtime sandbox execution.
+- Runtime prompt guardrail validation against a running app.
+- Runtime logs and evidence capture.
 - Container image vulnerability scanning.
 - License compliance.
 - Malware sandboxing.

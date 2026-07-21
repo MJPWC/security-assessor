@@ -84,6 +84,20 @@
         box-shadow: 0 1px 0 rgba(31, 31, 31, 0.05);
       }
       .stack { display: grid; gap: 14px; }
+      .field-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+      .field-full {
+        grid-column: 1 / -1;
+      }
+      .hint {
+        margin-top: 5px;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.35;
+      }
       label {
         display: block;
         font-size: 13px;
@@ -115,55 +129,6 @@
         min-height: 76px;
         resize: vertical;
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      }
-      .runtime-toggle {
-        display: flex;
-        align-items: flex-start;
-        gap: 9px;
-        padding: 11px;
-        border: 1px solid var(--line);
-        border-left: 4px solid var(--accent-dark);
-        border-radius: 4px;
-        background: var(--panel);
-      }
-      .runtime-toggle input {
-        margin-top: 2px;
-      }
-      .runtime-toggle strong {
-        display: block;
-        font-size: 13px;
-      }
-      .runtime-toggle span {
-        display: block;
-        margin-top: 2px;
-        color: var(--muted);
-        font-size: 12px;
-        line-height: 1.35;
-      }
-      .runtime-config {
-        display: none;
-        gap: 10px;
-        padding: 12px;
-        border: 1px solid var(--line);
-        border-radius: 4px;
-        background: #fff;
-      }
-      .runtime-config.active {
-        display: grid;
-      }
-      .field-grid {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 10px;
-      }
-      .field-full {
-        grid-column: 1 / -1;
-      }
-      .hint {
-        margin-top: 5px;
-        color: var(--muted);
-        font-size: 12px;
-        line-height: 1.35;
       }
       button {
         width: 100%;
@@ -384,71 +349,6 @@
           <label for="artifact">Upload application package</label>
           <input id="artifact" type="file" accept=".jar,.war,.zip,.tgz,.tar,.gz,.whl,.py,.js,.json">
         </div>
-        <label class="runtime-toggle" for="runtime-enabled">
-          <input id="runtime-enabled" type="checkbox">
-          <span>
-            <strong>Run Docker guardrail tests</strong>
-            <span>Starts the uploaded artifact in a temporary Docker container, sends restricted prompts, then removes the container.</span>
-          </span>
-        </label>
-        <div class="runtime-config" id="runtime-config">
-          <div class="field-grid">
-            <div>
-              <label for="runtime-image">Docker image</label>
-              <input id="runtime-image" type="text" value="node:20">
-              <div class="hint">Use `eclipse-temurin:17` for a runnable JAR.</div>
-            </div>
-            <div>
-              <label for="runtime-port">App port in container</label>
-              <input id="runtime-port" type="number" min="1" max="65535" value="5001">
-            </div>
-            <div class="field-full">
-              <label for="runtime-command">Start command</label>
-              <input id="runtime-command" type="text" value="npm start">
-              <div class="hint">For JARs: `java -jar /artifact/your-file.jar`. For TARs: command runs from `/app`.</div>
-            </div>
-            <div>
-              <label for="runtime-health">Health path</label>
-              <input id="runtime-health" type="text" value="/health">
-            </div>
-            <div>
-              <label for="runtime-endpoint">Prompt endpoint</label>
-              <input id="runtime-endpoint" type="text" value="/api/chat">
-            </div>
-            <div>
-              <label for="runtime-method">Method</label>
-              <select id="runtime-method">
-                <option>POST</option>
-                <option>PUT</option>
-              </select>
-            </div>
-            <div>
-              <label for="runtime-timeout">Startup timeout</label>
-              <input id="runtime-timeout" type="number" min="5" max="180" value="45">
-            </div>
-            <div class="field-full">
-              <label for="runtime-body">Request body template</label>
-              <textarea id="runtime-body">{"message":"{{prompt}}"}</textarea>
-            </div>
-            <div class="field-full">
-              <label for="runtime-headers">Headers</label>
-              <textarea id="runtime-headers" placeholder="Authorization: Bearer token"></textarea>
-            </div>
-            <div class="field-full">
-              <label for="runtime-env">Container environment</label>
-              <textarea id="runtime-env" placeholder="OPENAI_API_KEY=...
-LLM_PROVIDER=openai"></textarea>
-            </div>
-            <div class="field-full">
-              <label for="runtime-signals">Expected block signals</label>
-              <textarea id="runtime-signals">blocked
-warning
-not allowed
-restricted
-policy</textarea>
-            </div>
-          </div>
-        </div>
         <button id="scan">Run Security Assessment</button>
         <div class="status" id="status">Select a Node.js, Python, JAR, WAR, ZIP, TAR, TGZ, or wheel package.</div>
         <div class="summary">
@@ -458,6 +358,44 @@ policy</textarea>
           <div class="metric"><b id="low">0</b><span>Low</span></div>
         </div>
         <div class="links" id="links"></div>
+        <hr style="width:100%; border:0; border-top:1px solid var(--line);">
+        <div class="field-grid">
+          <div class="field-full">
+            <label for="target-url">Running app URL</label>
+            <input id="target-url" type="text" placeholder="http://16.16.70.70:5001">
+          </div>
+          <div>
+            <label for="guardrail-endpoint">Prompt endpoint</label>
+            <input id="guardrail-endpoint" type="text" value="/api/process">
+          </div>
+          <div>
+            <label for="guardrail-method">Method</label>
+            <select id="guardrail-method">
+              <option>POST</option>
+              <option>PUT</option>
+            </select>
+          </div>
+          <div class="field-full">
+            <label for="guardrail-body">Request body template</label>
+            <textarea id="guardrail-body">{"input":"{{prompt}}","apiName":"SecurityGuardrailTest","saveFiles":false}</textarea>
+            <div class="hint">Use {{prompt}} where the restricted prompt should be inserted.</div>
+          </div>
+          <div class="field-full">
+            <label for="guardrail-headers">Headers</label>
+            <textarea id="guardrail-headers" placeholder="Authorization: Bearer token"></textarea>
+          </div>
+          <div class="field-full">
+            <label for="guardrail-signals">Expected block signals</label>
+            <textarea id="guardrail-signals">blocked
+warning
+not allowed
+restricted
+policy
+cannot comply</textarea>
+          </div>
+        </div>
+        <button id="guardrail-scan">Run Restricted Prompt Test</button>
+        <div class="links" id="guardrail-links"></div>
       </section>
       <section class="stack">
         <div id="report" class="report-view">
@@ -471,21 +409,16 @@ policy</textarea>
       const statusEl = document.getElementById('status');
       const reportEl = document.getElementById('report');
       const linksEl = document.getElementById('links');
+      const guardrailLinksEl = document.getElementById('guardrail-links');
       const decisionEl = document.getElementById('decision');
-      const runtimeEnabledEl = document.getElementById('runtime-enabled');
-      const runtimeConfigEl = document.getElementById('runtime-config');
-      const runtimeFields = {
-        image: document.getElementById('runtime-image'),
-        startCommand: document.getElementById('runtime-command'),
-        appPort: document.getElementById('runtime-port'),
-        healthPath: document.getElementById('runtime-health'),
-        promptEndpoint: document.getElementById('runtime-endpoint'),
-        method: document.getElementById('runtime-method'),
-        startupTimeoutSeconds: document.getElementById('runtime-timeout'),
-        requestBodyTemplate: document.getElementById('runtime-body'),
-        headers: document.getElementById('runtime-headers'),
-        env: document.getElementById('runtime-env'),
-        expectedBlockSignals: document.getElementById('runtime-signals')
+      const guardrailButton = document.getElementById('guardrail-scan');
+      const guardrailFields = {
+        targetUrl: document.getElementById('target-url'),
+        endpoint: document.getElementById('guardrail-endpoint'),
+        method: document.getElementById('guardrail-method'),
+        bodyTemplate: document.getElementById('guardrail-body'),
+        headers: document.getElementById('guardrail-headers'),
+        expectedSignals: document.getElementById('guardrail-signals')
       };
       const counters = {
         critical: document.getElementById('critical'),
@@ -530,6 +463,18 @@ policy</textarea>
         ].join('');
       }
 
+      function renderGuardrailLinks(runId) {
+        if (!runId) {
+          guardrailLinksEl.innerHTML = '';
+          return;
+        }
+        guardrailLinksEl.innerHTML = [
+          `<a href="/api/reports/${runId}/guardrail-report.xlsx" download="guardrail-test-${runId}.xlsx">Guardrail Excel</a>`,
+          `<a href="/api/reports/${runId}/guardrail-report.md" download="guardrail-test-${runId}.md">Guardrail Markdown</a>`,
+          `<a href="/api/reports/${runId}/guardrail-report.json" download="guardrail-test-${runId}.json">Guardrail JSON</a>`
+        ].join('');
+      }
+
       function escapeHtml(value) {
         return String(value ?? '').replace(/[&<>"']/g, char => ({
           '&': '&amp;',
@@ -552,15 +497,9 @@ policy</textarea>
       function renderReport(payload) {
         const counts = payload.findingCounts || {};
         const findings = payload.findings || [];
-        const runtime = payload.runtime || {};
+        const certificateScan = payload.certificateScan || {};
+        const certificateFiles = certificateScan.certificateFiles || [];
         const components = payload.components || [];
-        const runtimeRows = (runtime.tests || []).map(test => `
-          <tr>
-            <td>${escapeHtml(test.name)}</td>
-            <td>${pill(test.passed ? 'Pass' : 'Fail', test.passed ? 'pass' : 'fail')}</td>
-            <td>${escapeHtml(test.status || '')}</td>
-            <td>${escapeHtml(test.reason || '')}</td>
-          </tr>`);
         const findingRows = findings.map(item => `
           <tr>
             <td>${pill(item.severity, item.severity)}</td>
@@ -573,6 +512,14 @@ policy</textarea>
             <td>${escapeHtml(item.name)}</td>
             <td>${escapeHtml(item.version)}</td>
           </tr>`);
+        const certificateRows = certificateFiles.map(item => `
+          <tr>
+            <td>${escapeHtml(item.file)}</td>
+            <td>${escapeHtml(item.type)}</td>
+            <td>${pill(item.parsed ? 'Parsed' : 'Review', item.parsed ? 'pass' : 'medium')}</td>
+            <td>${escapeHtml(item.subject || item.error || '')}</td>
+            <td>${escapeHtml(item.notAfter || '')}</td>
+          </tr>`);
         reportEl.innerHTML = `
           <section class="report-card">
             <h2>Assessment Summary</h2>
@@ -582,7 +529,7 @@ policy</textarea>
                 <dt>Decision</dt><dd>${pill(payload.decision || 'Unknown')}</dd>
                 <dt>Components</dt><dd>${escapeHtml(payload.componentCount || 0)}</dd>
                 <dt>Findings</dt><dd>Critical ${counts.critical || 0} · High ${counts.high || 0} · Medium ${counts.medium || 0} · Low ${counts.low || 0}</dd>
-                <dt>Runtime tests</dt><dd>${runtime.attempted ? `${runtime.failureCount || 0} failures` : 'Not enabled'}</dd>
+                <dt>Certificates</dt><dd>${certificateFiles.length}</dd>
               </dl>
             </div>
           </section>
@@ -591,8 +538,8 @@ policy</textarea>
             ${renderTable(['Severity', 'Task', 'Details'], findingRows, 'No findings were reported.')}
           </section>
           <section class="report-card">
-            <h2>Runtime Guardrail Tests</h2>
-            ${runtime.attempted ? renderTable(['Test', 'Result', 'HTTP', 'Reason'], runtimeRows, 'No runtime tests were executed.') : '<div class="card-body">Docker runtime guardrail tests were not enabled for this scan.</div>'}
+            <h2>Certificate and TLS Security</h2>
+            ${renderTable(['File', 'Type', 'Status', 'Subject / Error', 'Not After'], certificateRows, 'No certificate, keystore, or private key was found.')}
           </section>
           <section class="report-card">
             <h2>Dependency Sample</h2>
@@ -601,40 +548,36 @@ policy</textarea>
         `;
       }
 
-      function runtimeConfig() {
-        return {
-          enabled: runtimeEnabledEl.checked,
-          image: runtimeFields.image.value.trim(),
-          startCommand: runtimeFields.startCommand.value.trim(),
-          appPort: Number(runtimeFields.appPort.value || 8080),
-          healthPath: runtimeFields.healthPath.value.trim(),
-          promptEndpoint: runtimeFields.promptEndpoint.value.trim(),
-          method: runtimeFields.method.value,
-          startupTimeoutSeconds: Number(runtimeFields.startupTimeoutSeconds.value || 45),
-          requestBodyTemplate: runtimeFields.requestBodyTemplate.value,
-          headers: runtimeFields.headers.value,
-          env: runtimeFields.env.value,
-          expectedBlockSignals: runtimeFields.expectedBlockSignals.value
-        };
+      function renderGuardrailReport(payload) {
+        const summary = payload.summary || {};
+        const rows = (payload.tests || []).map(item => `
+          <tr>
+            <td>${escapeHtml(item.name)}</td>
+            <td>${pill(item.severity, item.severity)}</td>
+            <td>${pill(item.result, item.result === 'blocked' ? 'pass' : item.result === 'failed' ? 'fail' : 'medium')}</td>
+            <td>${escapeHtml(item.status || '')}</td>
+            <td>${escapeHtml(item.reason || '')}</td>
+          </tr>`);
+        reportEl.innerHTML = `
+          <section class="report-card">
+            <h2>Restricted Prompt Test Summary</h2>
+            <div class="card-body">
+              <dl class="kv">
+                <dt>Run ID</dt><dd>${escapeHtml(payload.runId)}</dd>
+                <dt>Decision</dt><dd>${pill(payload.decision || 'Unknown', summary.failed ? 'fail' : summary.warnings ? 'medium' : 'pass')}</dd>
+                <dt>Total prompts</dt><dd>${escapeHtml(summary.total || 0)}</dd>
+                <dt>Blocked</dt><dd>${escapeHtml(summary.blocked || 0)}</dd>
+                <dt>Failed</dt><dd>${escapeHtml(summary.failed || 0)}</dd>
+                <dt>Warnings</dt><dd>${escapeHtml(summary.warnings || 0)}</dd>
+              </dl>
+            </div>
+          </section>
+          <section class="report-card">
+            <h2>Prompt Results</h2>
+            ${renderTable(['Prompt', 'Severity', 'Result', 'HTTP', 'Reason'], rows, 'No prompt tests were executed.')}
+          </section>
+        `;
       }
-
-      runtimeEnabledEl.addEventListener('change', () => {
-        runtimeConfigEl.classList.toggle('active', runtimeEnabledEl.checked);
-      });
-
-      fileInput.addEventListener('change', () => {
-        const file = fileInput.files && fileInput.files[0];
-        const name = String(file?.name || '').toLowerCase();
-        if (name.endsWith('.jar') || name.endsWith('.war')) {
-          runtimeFields.image.value = 'eclipse-temurin:17';
-          runtimeFields.startCommand.value = file ? `java -jar /artifact/${file.name.replace(/[^A-Za-z0-9._-]/g, '_')}` : 'java -jar /artifact/app.jar';
-          runtimeFields.appPort.value = '8080';
-        } else if (name.endsWith('.tar') || name.endsWith('.tgz') || name.endsWith('.tar.gz')) {
-          runtimeFields.image.value = 'node:20';
-          runtimeFields.startCommand.value = 'npm start';
-          runtimeFields.appPort.value = '5001';
-        }
-      });
 
       scanButton.addEventListener('click', async () => {
         const file = fileInput.files && fileInput.files[0];
@@ -650,11 +593,11 @@ policy</textarea>
         try {
           setStatus('Reading upload in browser...');
           const contentBase64 = arrayBufferToBase64(await file.arrayBuffer());
-          setStatus(runtimeEnabledEl.checked ? 'Uploading, scanning, and starting Docker sandbox...' : 'Uploading and running checks...');
+          setStatus('Uploading and running checks...');
           const response = await fetch('/api/assess', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ fileName: file.name, contentBase64, runtimeConfig: runtimeConfig() })
+            body: JSON.stringify({ fileName: file.name, contentBase64 })
           });
           const payload = await response.json();
           if (!response.ok) throw new Error(payload.error || 'Assessment failed.');
@@ -664,14 +607,52 @@ policy</textarea>
           }
           renderReport(payload);
           renderLinks(payload.runId);
-          const runtimeText = payload.runtime?.attempted ? ` Runtime tests: ${payload.runtime.failureCount || 0} failures.` : '';
-          setStatus(`Completed run ${payload.runId}. Components found: ${payload.componentCount}.${runtimeText}`);
+          setStatus(`Completed run ${payload.runId}. Components found: ${payload.componentCount}.`);
         } catch (error) {
           setDecision('Failed');
           reportEl.innerHTML = `<div class="report-empty">${escapeHtml(error.message)}</div>`;
           setStatus('Assessment failed. Check the selected package and try again.');
         } finally {
           scanButton.disabled = false;
+        }
+      });
+
+      guardrailButton.addEventListener('click', async () => {
+        const targetUrl = guardrailFields.targetUrl.value.trim();
+        if (!targetUrl) {
+          setStatus('Please enter the running app URL first.');
+          return;
+        }
+        guardrailButton.disabled = true;
+        reportEl.innerHTML = '<div class="report-empty">Running restricted prompt tests...</div>';
+        renderGuardrailLinks();
+        setDecision('Running');
+        try {
+          setStatus('Sending restricted prompts to running app...');
+          const response = await fetch('/api/guardrail-test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              targetUrl,
+              endpoint: guardrailFields.endpoint.value.trim(),
+              method: guardrailFields.method.value,
+              bodyTemplate: guardrailFields.bodyTemplate.value,
+              headers: guardrailFields.headers.value,
+              expectedSignals: guardrailFields.expectedSignals.value
+            })
+          });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.error || 'Restricted prompt test failed.');
+          setDecision(payload.decision);
+          renderGuardrailReport(payload);
+          renderGuardrailLinks(payload.runId);
+          setStatus(`Completed restricted prompt run ${payload.runId}. Failed prompts: ${payload.summary?.failed || 0}.`);
+        } catch (error) {
+          setDecision('Failed');
+          reportEl.innerHTML = `<div class="report-empty">${escapeHtml(error.message)}</div>`;
+          setStatus('Restricted prompt test failed. Check target URL, endpoint, and request body.');
+        } finally {
+          guardrailButton.disabled = false;
         }
       });
     </script>

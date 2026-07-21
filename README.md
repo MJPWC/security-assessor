@@ -6,6 +6,7 @@ This is a Python MVP web app for assessing deployable application packages befor
 
 - Archive path traversal before extraction.
 - Hardcoded secrets in packaged text files.
+- Packaged certificate, keystore, and private key review.
 - npm, Python, Maven, manifest, and nested JAR dependency inventory.
 - `npm audit` for every package folder that has both `package.json` and `package-lock.json`, including nested frontend apps such as `client/`.
 - CycloneDX-lite SBOM generation.
@@ -51,6 +52,7 @@ Generated files:
 
 - `report.md`
 - `report.json`
+- `report.xlsx`
 - `sbom.json`
 
 ## Role In The Security Process
@@ -64,4 +66,4 @@ For MuleGenie, that means:
 
 ## Current Scope
 
-This first version is a pre-deployment assessor. It is not a replacement for enterprise SAST, DAST, container image scanning, malware sandboxing, license compliance, or runtime cloud controls. It gives a repeatable local/security-team workflow that can be extended with those scanners.
+This first version is a pre-deployment assessor. It is not a replacement for enterprise SAST, DAST, VM-based runtime testing, malware sandboxing, license compliance, or cloud controls. It gives a repeatable local/security-team workflow that can be extended with those scanners.
