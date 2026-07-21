@@ -378,7 +378,12 @@
           <div class="field-full">
             <label for="guardrail-body">Request body template</label>
             <textarea id="guardrail-body">{"input":"{{prompt}}","apiName":"SecurityGuardrailTest","saveFiles":false}</textarea>
-            <div class="hint">Use {{prompt}} where the restricted prompt should be inserted.</div>
+            <div class="hint">Keep {{prompt}} in this template. If no prompt file is uploaded, built-in restricted and allowed prompts are used.</div>
+          </div>
+          <div class="field-full">
+            <label for="prompt-file">Prompt file</label>
+            <input id="prompt-file" type="file" accept=".txt,.csv,.json">
+            <div class="hint">Optional. TXT uses one prompt per line. CSV/JSON can include prompt, expected, severity, and name.</div>
           </div>
           <div class="field-full">
             <label for="guardrail-headers">Headers</label>
@@ -394,7 +399,7 @@ policy
 cannot comply</textarea>
           </div>
         </div>
-        <button id="guardrail-scan">Run Restricted Prompt Test</button>
+        <button id="guardrail-scan">Run Prompt Guardrail Test</button>
         <div class="links" id="guardrail-links"></div>
       </section>
       <section class="stack">
@@ -417,6 +422,7 @@ cannot comply</textarea>
         endpoint: document.getElementById('guardrail-endpoint'),
         method: document.getElementById('guardrail-method'),
         bodyTemplate: document.getElementById('guardrail-body'),
+        promptFile: document.getElementById('prompt-file'),
         headers: document.getElementById('guardrail-headers'),
         expectedSignals: document.getElementById('guardrail-signals')
       };
@@ -553,28 +559,33 @@ cannot comply</textarea>
         const rows = (payload.tests || []).map(item => `
           <tr>
             <td>${escapeHtml(item.name)}</td>
+            <td>${escapeHtml(item.type)}</td>
             <td>${pill(item.severity, item.severity)}</td>
-            <td>${pill(item.result, item.result === 'blocked' ? 'pass' : item.result === 'failed' ? 'fail' : 'medium')}</td>
+            <td>${escapeHtml(item.expected)}</td>
+            <td>${pill(item.result, item.passed ? 'pass' : item.result === 'warning' ? 'medium' : 'fail')}</td>
             <td>${escapeHtml(item.status || '')}</td>
             <td>${escapeHtml(item.reason || '')}</td>
           </tr>`);
         reportEl.innerHTML = `
           <section class="report-card">
-            <h2>Restricted Prompt Test Summary</h2>
+            <h2>Prompt Guardrail Test Summary</h2>
             <div class="card-body">
               <dl class="kv">
                 <dt>Run ID</dt><dd>${escapeHtml(payload.runId)}</dd>
                 <dt>Decision</dt><dd>${pill(payload.decision || 'Unknown', summary.failed ? 'fail' : summary.warnings ? 'medium' : 'pass')}</dd>
+                <dt>Prompt source</dt><dd>${escapeHtml(payload.promptSource || 'Built-in prompts')}</dd>
                 <dt>Total prompts</dt><dd>${escapeHtml(summary.total || 0)}</dd>
-                <dt>Blocked</dt><dd>${escapeHtml(summary.blocked || 0)}</dd>
-                <dt>Failed</dt><dd>${escapeHtml(summary.failed || 0)}</dd>
+                <dt>Restricted prompts blocked</dt><dd>${escapeHtml(summary.restrictedBlocked || 0)}</dd>
+                <dt>Restricted failed</dt><dd>${escapeHtml(summary.restrictedFailed || 0)}</dd>
+                <dt>Allowed passed</dt><dd>${escapeHtml(summary.allowedPassed || 0)}</dd>
+                <dt>Allowed failed</dt><dd>${escapeHtml(summary.allowedFailed || 0)}</dd>
                 <dt>Warnings</dt><dd>${escapeHtml(summary.warnings || 0)}</dd>
               </dl>
             </div>
           </section>
           <section class="report-card">
             <h2>Prompt Results</h2>
-            ${renderTable(['Prompt', 'Severity', 'Result', 'HTTP', 'Reason'], rows, 'No prompt tests were executed.')}
+            ${renderTable(['Prompt', 'Type', 'Severity', 'Expected', 'Result', 'HTTP', 'Reason'], rows, 'No prompt tests were executed.')}
           </section>
         `;
       }
@@ -624,11 +635,22 @@ cannot comply</textarea>
           return;
         }
         guardrailButton.disabled = true;
-        reportEl.innerHTML = '<div class="report-empty">Running restricted prompt tests...</div>';
+        reportEl.innerHTML = '<div class="report-empty">Running prompt guardrail tests...</div>';
         renderGuardrailLinks();
         setDecision('Running');
         try {
-          setStatus('Sending restricted prompts to running app...');
+          if (!guardrailFields.bodyTemplate.value.includes('{{prompt}}')) {
+            throw new Error('Request body template must contain {{prompt}}.');
+          }
+          const promptFile = guardrailFields.promptFile.files && guardrailFields.promptFile.files[0];
+          let promptFileName = '';
+          let promptFileContentBase64 = '';
+          if (promptFile) {
+            setStatus(`Reading prompt file ${promptFile.name}...`);
+            promptFileName = promptFile.name;
+            promptFileContentBase64 = arrayBufferToBase64(await promptFile.arrayBuffer());
+          }
+          setStatus('Sending restricted and allowed prompts to running app...');
           const response = await fetch('/api/guardrail-test', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -637,20 +659,22 @@ cannot comply</textarea>
               endpoint: guardrailFields.endpoint.value.trim(),
               method: guardrailFields.method.value,
               bodyTemplate: guardrailFields.bodyTemplate.value,
+              promptFileName,
+              promptFileContentBase64,
               headers: guardrailFields.headers.value,
               expectedSignals: guardrailFields.expectedSignals.value
             })
           });
           const payload = await response.json();
-          if (!response.ok) throw new Error(payload.error || 'Restricted prompt test failed.');
+          if (!response.ok) throw new Error(payload.error || 'Prompt guardrail test failed.');
           setDecision(payload.decision);
           renderGuardrailReport(payload);
           renderGuardrailLinks(payload.runId);
-          setStatus(`Completed restricted prompt run ${payload.runId}. Failed prompts: ${payload.summary?.failed || 0}.`);
+          setStatus(`Completed prompt guardrail run ${payload.runId}. Failed prompts: ${payload.summary?.failed || 0}.`);
         } catch (error) {
           setDecision('Failed');
           reportEl.innerHTML = `<div class="report-empty">${escapeHtml(error.message)}</div>`;
-          setStatus('Restricted prompt test failed. Check target URL, endpoint, and request body.');
+          setStatus('Prompt guardrail test failed. Check target URL, endpoint, and request body.');
         } finally {
           guardrailButton.disabled = false;
         }

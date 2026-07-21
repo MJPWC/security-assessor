@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import base64
+import csv
 import hashlib
+import io
 import json
 import os
 import re
@@ -21,10 +23,13 @@ APP_DIR = Path(__file__).resolve().parent
 PUBLIC_DIR = APP_DIR / "public"
 RUNS_DIR = APP_DIR / "output" / "security-assessor" / "runs"
 RESTRICTED_PROMPTS_PATH = APP_DIR / "restricted_prompts.json"
+ALLOWED_PROMPTS_PATH = APP_DIR / "allowed_prompts.json"
 PORT = int(os.getenv("SECURITY_ASSESSOR_PORT", "5050"))
 MAX_UPLOAD_BYTES = int(os.getenv("SECURITY_ASSESSOR_MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
 TEXT_FILE_LIMIT_BYTES = int(os.getenv("SECURITY_ASSESSOR_TEXT_FILE_LIMIT_BYTES", str(512 * 1024)))
 MAX_WALK_FILES = int(os.getenv("SECURITY_ASSESSOR_MAX_WALK_FILES", "3000"))
+MAX_PROMPT_FILE_BYTES = int(os.getenv("SECURITY_ASSESSOR_MAX_PROMPT_FILE_BYTES", str(1024 * 1024)))
+MAX_PROMPTS_PER_RUN = int(os.getenv("SECURITY_ASSESSOR_MAX_PROMPTS_PER_RUN", "250"))
 
 TEXT_EXTENSIONS = {
     ".js", ".jsx", ".ts", ".tsx", ".json", ".yaml", ".yml", ".xml", ".properties",
@@ -570,12 +575,12 @@ def run_llm_review(assessment):
         return "LLM review unavailable: " + redact_text(str(exc))
 
 
-def load_restricted_prompts():
-    if not RESTRICTED_PROMPTS_PATH.exists():
-        raise ValueError(f"Restricted prompt file not found: {RESTRICTED_PROMPTS_PATH}")
-    prompts = json.loads(RESTRICTED_PROMPTS_PATH.read_text())
+def load_prompt_file(path, default_severity="info"):
+    if not path.exists():
+        raise ValueError(f"Prompt file not found: {path}")
+    prompts = json.loads(path.read_text())
     if not isinstance(prompts, list):
-        raise ValueError("restricted_prompts.json must contain a JSON array.")
+        raise ValueError(f"{path.name} must contain a JSON array.")
     normalized = []
     for index, item in enumerate(prompts, start=1):
         if not isinstance(item, dict) or not str(item.get("prompt") or "").strip():
@@ -583,12 +588,88 @@ def load_restricted_prompts():
         normalized.append({
             "id": str(item.get("id") or f"prompt_{index}"),
             "name": str(item.get("name") or item.get("id") or f"Prompt {index}"),
-            "severity": str(item.get("severity") or "medium").lower() if str(item.get("severity") or "medium").lower() in SEVERITY_RANK else "medium",
+            "severity": str(item.get("severity") or default_severity).lower() if str(item.get("severity") or default_severity).lower() in SEVERITY_RANK else default_severity,
             "prompt": str(item.get("prompt")),
         })
     if not normalized:
-        raise ValueError("restricted_prompts.json does not contain any usable prompts.")
+        raise ValueError(f"{path.name} does not contain any usable prompts.")
     return normalized
+
+
+def load_restricted_prompts():
+    return load_prompt_file(RESTRICTED_PROMPTS_PATH, "medium")
+
+
+def load_allowed_prompts():
+    return load_prompt_file(ALLOWED_PROMPTS_PATH, "info")
+
+
+def normalize_uploaded_prompt(item, index):
+    if isinstance(item, str):
+        item = {"prompt": item}
+    if not isinstance(item, dict):
+        raise ValueError(f"Prompt item {index} must be a string or object.")
+    prompt = str(item.get("prompt") or item.get("input") or item.get("text") or "").strip()
+    if not prompt:
+        raise ValueError(f"Prompt item {index} does not contain prompt text.")
+    prompt_type = str(item.get("type") or item.get("category") or "").strip().lower()
+    expected = str(item.get("expected") or "").strip().lower()
+    if expected in {"pass", "passed", "accept", "accepted"}:
+        expected = "allowed"
+    if expected in {"block", "blocked", "deny", "denied", "reject", "rejected"}:
+        expected = "blocked"
+    if not expected:
+        expected = "allowed" if prompt_type == "allowed" else "blocked"
+    if expected not in {"blocked", "allowed"}:
+        raise ValueError(f"Prompt item {index} has unsupported expected value: {expected}")
+    prompt_type = "allowed" if expected == "allowed" else "restricted"
+    default_severity = "info" if prompt_type == "allowed" else "medium"
+    severity = str(item.get("severity") or default_severity).strip().lower()
+    if severity not in SEVERITY_RANK:
+        severity = default_severity
+    return {
+        "id": str(item.get("id") or f"uploaded_prompt_{index}"),
+        "name": str(item.get("name") or item.get("id") or f"Uploaded prompt {index}"),
+        "severity": severity,
+        "prompt": prompt,
+        "type": prompt_type,
+        "expected": expected,
+    }
+
+
+def parse_uploaded_prompt_file(file_name, content_base64):
+    if not content_base64:
+        return None
+    data = base64.b64decode(content_base64)
+    if len(data) > MAX_PROMPT_FILE_BYTES:
+        raise ValueError(f"Prompt file is too large. Limit is {MAX_PROMPT_FILE_BYTES // 1024} KB.")
+    name = str(file_name or "uploaded-prompts.txt")
+    suffix = Path(name).suffix.lower()
+    text = data.decode("utf-8-sig", errors="replace")
+    if suffix == ".json":
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            parsed = parsed.get("prompts") or parsed.get("tests") or parsed.get("testCases")
+        if not isinstance(parsed, list):
+            raise ValueError("Prompt JSON must be an array or an object with prompts/tests/testCases array.")
+        raw_items = parsed
+    elif suffix == ".csv":
+        rows = list(csv.DictReader(io.StringIO(text)))
+        if rows and "prompt" in {key.strip().lower() for key in rows[0].keys() if key}:
+            raw_items = []
+            for row in rows:
+                normalized_row = {str(key).strip().lower(): value for key, value in row.items() if key}
+                raw_items.append(normalized_row)
+        else:
+            raw_items = [line.strip() for line in text.splitlines() if line.strip()]
+    else:
+        raw_items = [line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+    prompts = [normalize_uploaded_prompt(item, index) for index, item in enumerate(raw_items, start=1)]
+    if not prompts:
+        raise ValueError("Prompt file does not contain any usable prompts.")
+    if len(prompts) > MAX_PROMPTS_PER_RUN:
+        raise ValueError(f"Prompt file contains {len(prompts)} prompts. Limit is {MAX_PROMPTS_PER_RUN} per run.")
+    return {"source": name, "prompts": prompts}
 
 
 def normalize_endpoint(path):
@@ -668,10 +749,10 @@ def send_guardrail_prompt(config, prompt):
 
 def guardrail_decision(failure_count, warning_count):
     if failure_count:
-        return "Blocked: restricted prompts passed"
+        return "Failed: guardrail behavior mismatch"
     if warning_count:
         return "Review warnings"
-    return "Passed: restricted prompts blocked"
+    return "Passed: guardrail behavior expected"
 
 
 def build_guardrail_markdown(result):
@@ -682,22 +763,25 @@ def build_guardrail_markdown(result):
         f"Generated: {result['generatedAt']}",
         f"Target URL: {result['targetUrl']}",
         f"Endpoint: {result['endpoint']}",
+        f"Prompt Source: {result.get('promptSource', '')}",
         f"Decision: {result['decision']}",
         "",
         "## Summary",
         "",
         f"- Total prompts: {result['summary']['total']}",
-        f"- Blocked as expected: {result['summary']['blocked']}",
-        f"- Failed: {result['summary']['failed']}",
+        f"- Restricted blocked: {result['summary']['restrictedBlocked']}",
+        f"- Restricted failed: {result['summary']['restrictedFailed']}",
+        f"- Allowed passed: {result['summary']['allowedPassed']}",
+        f"- Allowed failed: {result['summary']['allowedFailed']}",
         f"- Warnings: {result['summary']['warnings']}",
         "",
         "## Prompt Results",
         "",
-        "| Prompt | Severity | Result | HTTP | Reason |",
-        "| --- | --- | --- | ---: | --- |",
+        "| Prompt | Type | Severity | Result | HTTP | Reason |",
+        "| --- | --- | --- | --- | ---: | --- |",
     ]
     for item in result["tests"]:
-        lines.append(f"| {item['name']} | {item['severity']} | {item['result']} | {item.get('status') or ''} | {item['reason']} |")
+        lines.append(f"| {item['name']} | {item['type']} | {item['severity']} | {item['result']} | {item.get('status') or ''} | {item['reason']} |")
     lines.extend([
         "",
         "## Evidence Notes",
@@ -708,11 +792,13 @@ def build_guardrail_markdown(result):
 
 
 def guardrail_rows(result):
-    rows = [style_header(["Prompt", "Severity", "Result", "HTTP Status", "Reason", "Response Sample", "Error"])]
+    rows = [style_header(["Prompt", "Type", "Severity", "Expected", "Result", "HTTP Status", "Reason", "Response Sample", "Error"])]
     for item in result.get("tests", []):
         rows.append([
             item.get("name", ""),
+            item.get("type", ""),
             item.get("severity", ""),
+            item.get("expected", ""),
             item.get("result", ""),
             item.get("status") or "",
             item.get("reason", ""),
@@ -731,17 +817,20 @@ def build_guardrail_xlsx(result):
         ["Generated", result["generatedAt"]],
         ["Target URL", result["targetUrl"]],
         ["Endpoint", result["endpoint"]],
+        ["Prompt Source", result.get("promptSource", "")],
         ["Decision", result["decision"]],
         [],
         style_header(["Metric", "Count"]),
         ["Total prompts", result["summary"]["total"]],
-        ["Blocked as expected", result["summary"]["blocked"]],
-        ["Failed", result["summary"]["failed"]],
+        ["Restricted blocked", result["summary"]["restrictedBlocked"]],
+        ["Restricted failed", result["summary"]["restrictedFailed"]],
+        ["Allowed passed", result["summary"]["allowedPassed"]],
+        ["Allowed failed", result["summary"]["allowedFailed"]],
         ["Warnings", result["summary"]["warnings"]],
     ]
     sheets = [
         ("Summary", rows, [28, 90]),
-        ("Prompt Results", guardrail_rows(result), [34, 14, 18, 14, 52, 80, 60]),
+        ("Prompt Results", guardrail_rows(result), [34, 14, 14, 18, 18, 14, 52, 80, 60]),
     ]
     content_types = [
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
@@ -791,7 +880,6 @@ def build_guardrail_xlsx(result):
         '<xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs>'
         '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>'
     )
-    import io
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as package:
         package.writestr("[Content_Types].xml", "".join(content_types))
@@ -808,40 +896,75 @@ def run_guardrail_test(payload):
     target_url = str(payload.get("targetUrl") or "").strip().rstrip("/")
     if not target_url.startswith(("http://", "https://")):
         raise ValueError("Target app URL must start with http:// or https://")
+    body_template = str(payload.get("bodyTemplate") or '{"input":"{{prompt}}","apiName":"SecurityGuardrailTest","saveFiles":false}')
+    if "{{prompt}}" not in body_template:
+        raise ValueError("Request body template must contain {{prompt}}. Do not type a single prompt there; the assessor inserts each prompt from the prompt files.")
     config = {
         "targetUrl": target_url,
         "endpoint": normalize_endpoint(payload.get("endpoint") or "/api/process"),
         "method": str(payload.get("method") or "POST").upper(),
-        "bodyTemplate": str(payload.get("bodyTemplate") or '{"input":"{{prompt}}","apiName":"SecurityGuardrailTest","saveFiles":false}'),
+        "bodyTemplate": body_template,
         "headers": parse_header_text(payload.get("headers")),
         "expectedSignals": parse_signal_text(payload.get("expectedSignals")),
         "timeoutSeconds": max(3, min(120, int(payload.get("timeoutSeconds") or 30))),
     }
-    prompts = load_restricted_prompts()
+    uploaded_prompt_file = parse_uploaded_prompt_file(payload.get("promptFileName"), payload.get("promptFileContentBase64"))
+    if uploaded_prompt_file:
+        prompts = uploaded_prompt_file["prompts"]
+        prompt_source = uploaded_prompt_file["source"]
+    else:
+        prompts = [
+            {**item, "type": "restricted", "expected": "blocked"}
+            for item in load_restricted_prompts()
+        ] + [
+            {**item, "type": "allowed", "expected": "allowed"}
+            for item in load_allowed_prompts()
+        ]
+        prompt_source = "Built-in restricted_prompts.json and allowed_prompts.json"
     tests = []
-    failed = 0
+    restricted_failed = 0
+    restricted_blocked = 0
+    allowed_failed = 0
+    allowed_passed = 0
     warnings = 0
-    blocked = 0
     for prompt_item in prompts:
         response = send_guardrail_prompt(config, prompt_item["prompt"])
         was_blocked, reason = evaluate_guardrail_block(response, config["expectedSignals"])
-        if was_blocked:
-            result = "blocked"
-            blocked += 1
-        elif response.get("status") is None:
+        if response.get("status") is None:
             result = "warning"
+            passed = False
             warnings += 1
-        else:
+            result_reason = response.get("error") or reason
+        elif prompt_item["expected"] == "blocked" and was_blocked:
+            result = "blocked"
+            passed = True
+            restricted_blocked += 1
+            result_reason = reason
+        elif prompt_item["expected"] == "blocked":
             result = "failed"
-            failed += 1
+            passed = False
+            restricted_failed += 1
+            result_reason = reason
+        elif was_blocked:
+            result = "failed"
+            passed = False
+            allowed_failed += 1
+            result_reason = "Allowed prompt was blocked: " + reason
+        else:
+            result = "allowed"
+            passed = True
+            allowed_passed += 1
+            result_reason = "Allowed prompt was accepted"
         tests.append({
             "id": prompt_item["id"],
             "name": prompt_item["name"],
-            "severity": prompt_item["severity"],
+            "type": prompt_item["type"],
+            "expected": prompt_item["expected"],
+            "severity": prompt_item.get("severity", "info"),
             "result": result,
-            "passed": result == "blocked",
+            "passed": passed,
             "status": response.get("status"),
-            "reason": reason if response.get("status") is not None else response.get("error") or reason,
+            "reason": result_reason,
             "responseSample": redact_text(response.get("body") or "")[:1000],
             "error": response.get("error") or "",
         })
@@ -855,13 +978,17 @@ def run_guardrail_test(payload):
         "targetUrl": target_url,
         "endpoint": config["endpoint"],
         "method": config["method"],
+        "promptSource": prompt_source,
         "summary": {
             "total": len(tests),
-            "blocked": blocked,
-            "failed": failed,
+            "restrictedBlocked": restricted_blocked,
+            "restrictedFailed": restricted_failed,
+            "allowedPassed": allowed_passed,
+            "allowedFailed": allowed_failed,
+            "failed": restricted_failed + allowed_failed,
             "warnings": warnings,
         },
-        "decision": guardrail_decision(failed, warnings),
+        "decision": guardrail_decision(restricted_failed + allowed_failed, warnings),
         "tests": tests,
     }
     result["reportMarkdown"] = build_guardrail_markdown(result)
@@ -1277,6 +1404,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "runId": result["runId"],
                     "decision": result["decision"],
                     "summary": result["summary"],
+                    "promptSource": result["promptSource"],
                     "tests": result["tests"],
                     "reportMarkdown": result["reportMarkdown"],
                     "markdownPath": result["markdownPath"],

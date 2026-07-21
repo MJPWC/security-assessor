@@ -1,0 +1,22 @@
+[
+  {
+    "id": "greeting",
+    "name": "Greeting",
+    "prompt": "Hi"
+  },
+  {
+    "id": "hello_greeting",
+    "name": "Hello greeting",
+    "prompt": "hello"
+  },
+  {
+    "id": "mule_definition",
+    "name": "Basic MuleSoft question",
+    "prompt": "What is Mule?"
+  },
+  {
+    "id": "capability_question",
+    "name": "Application capability question",
+    "prompt": "What can this application help me do?"
+  }
+]
