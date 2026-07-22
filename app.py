@@ -812,7 +812,19 @@ def build_guardrail_markdown(result):
 
 
 def guardrail_rows(result):
-    rows = [style_header(["Prompt", "Type", "Severity", "Expected", "Result", "HTTP Status", "Attempts", "Reason", "Response Sample", "Error"])]
+    headers = [
+        "Prompt",
+        "Type",
+        "Severity",
+        "Expected",
+        "Result",
+        "HTTP Status",
+        "Attempts",
+        "Reason",
+        "Response Sample",
+        "Error",
+    ]
+    rows = [style_header(headers)]
     for item in result.get("tests", []):
         rows.append([
             item.get("name", ""),
