@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import tarfile
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -728,6 +729,17 @@ def evaluate_guardrail_block(response, expected_signals):
     return False, "No blocking status or expected warning text was observed"
 
 
+def retry_after_seconds(headers, fallback_seconds):
+    value = ""
+    if headers:
+        value = headers.get("Retry-After") or headers.get("retry-after") or ""
+    try:
+        seconds = float(value)
+        return max(0.0, min(120.0, seconds))
+    except (TypeError, ValueError):
+        return fallback_seconds
+
+
 def send_guardrail_prompt(config, prompt):
     data = None
     method = config["method"]
@@ -735,16 +747,23 @@ def send_guardrail_prompt(config, prompt):
     url = config["targetUrl"].rstrip("/") + config["endpoint"]
     if method != "GET":
         data = request_body_from_template(config["bodyTemplate"], prompt)
-    request = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(request, timeout=config["timeoutSeconds"]) as response:
-            body = response.read(12000).decode("utf-8", errors="ignore")
-            return {"ok": True, "status": response.status, "body": redact_text(body), "error": ""}
-    except urllib.error.HTTPError as exc:
-        body = exc.read(12000).decode("utf-8", errors="ignore")
-        return {"ok": False, "status": exc.code, "body": redact_text(body), "error": redact_text(str(exc))}
-    except Exception as exc:
-        return {"ok": False, "status": None, "body": "", "error": redact_text(str(exc))}
+    attempts = config["rateLimitRetries"] + 1
+    for attempt in range(attempts):
+        request = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(request, timeout=config["timeoutSeconds"]) as response:
+                body = response.read(12000).decode("utf-8", errors="ignore")
+                return {"ok": True, "status": response.status, "body": redact_text(body), "error": "", "attempts": attempt + 1}
+        except urllib.error.HTTPError as exc:
+            body = exc.read(12000).decode("utf-8", errors="ignore")
+            if exc.code == 429 and attempt < attempts - 1:
+                wait_seconds = retry_after_seconds(exc.headers, config["rateLimitDelaySeconds"])
+                time.sleep(wait_seconds)
+                continue
+            return {"ok": False, "status": exc.code, "body": redact_text(body), "error": redact_text(str(exc)), "attempts": attempt + 1}
+        except Exception as exc:
+            return {"ok": False, "status": None, "body": "", "error": redact_text(str(exc)), "attempts": attempt + 1}
+    return {"ok": False, "status": None, "body": "", "error": "Request failed after retry loop.", "attempts": attempts}
 
 
 def guardrail_decision(failure_count, warning_count):
@@ -778,11 +797,11 @@ def build_guardrail_markdown(result):
         "",
         "## Prompt Results",
         "",
-        "| Prompt | Type | Severity | Result | HTTP | Reason |",
-        "| --- | --- | --- | --- | ---: | --- |",
+        "| Prompt | Type | Severity | Result | HTTP | Attempts | Reason |",
+        "| --- | --- | --- | --- | ---: | ---: | --- |",
     ]
     for item in result["tests"]:
-        lines.append(f"| {item['name']} | {item['type']} | {item['severity']} | {item['result']} | {item.get('status') or ''} | {item['reason']} |")
+        lines.append(f"| {item['name']} | {item['type']} | {item['severity']} | {item['result']} | {item.get('status') or ''} | {item.get('attempts') or ''} | {item['reason']} |")
     lines.extend([
         "",
         "## Evidence Notes",
@@ -793,7 +812,7 @@ def build_guardrail_markdown(result):
 
 
 def guardrail_rows(result):
-    rows = [style_header(["Prompt", "Type", "Severity", "Expected", "Result", "HTTP Status", "Reason", "Response Sample", "Error"])]
+    rows = [style_header(["Prompt", "Type", "Severity", "Expected", "Result", "HTTP Status", "Attempts", "Reason", "Response Sample", "Error"])]
     for item in result.get("tests", []):
         rows.append([
             item.get("name", ""),
@@ -802,6 +821,7 @@ def guardrail_rows(result):
             item.get("expected", ""),
             item.get("result", ""),
             item.get("status") or "",
+            item.get("attempts") or "",
             item.get("reason", ""),
             item.get("responseSample", ""),
             item.get("error", ""),
@@ -832,7 +852,7 @@ def build_guardrail_xlsx(result):
     ]
     sheets = [
         ("Summary", rows, [28, 90]),
-        ("Prompt Results", guardrail_rows(result), [34, 14, 14, 18, 18, 14, 52, 80, 60]),
+        ("Prompt Results", guardrail_rows(result), [34, 14, 14, 18, 18, 14, 12, 52, 80, 60]),
     ]
     content_types = [
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
@@ -910,6 +930,8 @@ def run_guardrail_test(payload):
         "expectedSignals": parse_signal_text(payload.get("expectedSignals")),
         "timeoutSeconds": max(3, min(120, int(payload.get("timeoutSeconds") or 30))),
         "executeAllowedPrompts": bool(payload.get("executeAllowedPrompts")),
+        "rateLimitDelaySeconds": max(0.0, min(60.0, int(payload.get("rateLimitDelayMs") or 1000) / 1000.0)),
+        "rateLimitRetries": max(0, min(10, int(payload.get("rateLimitRetries") or 2))),
     }
     uploaded_prompt_file = parse_uploaded_prompt_file(payload.get("promptFileName"), payload.get("promptFileContentBase64"))
     if uploaded_prompt_file:
@@ -931,6 +953,7 @@ def run_guardrail_test(payload):
     allowed_passed = 0
     allowed_skipped = 0
     warnings = 0
+    sent_prompt_count = 0
     for prompt_item in prompts:
         if prompt_item["expected"] == "allowed" and not config["executeAllowedPrompts"]:
             allowed_skipped += 1
@@ -946,9 +969,13 @@ def run_guardrail_test(payload):
                 "reason": "Allowed prompt was not sent to the target endpoint. Enable allowed-prompt execution only for guardrail-only or no-op endpoints.",
                 "responseSample": "",
                 "error": "",
+                "attempts": "",
             })
             continue
+        if sent_prompt_count and config["rateLimitDelaySeconds"]:
+            time.sleep(config["rateLimitDelaySeconds"])
         response = send_guardrail_prompt(config, prompt_item["prompt"])
+        sent_prompt_count += 1
         was_blocked, reason = evaluate_guardrail_block(response, config["expectedSignals"])
         if response.get("status") is None:
             result = "warning"
@@ -984,6 +1011,7 @@ def run_guardrail_test(payload):
             "result": result,
             "passed": passed,
             "status": response.get("status"),
+            "attempts": response.get("attempts") or 1,
             "reason": result_reason,
             "responseSample": redact_text(response.get("body") or "")[:1000],
             "error": response.get("error") or "",

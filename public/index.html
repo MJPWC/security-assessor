@@ -392,6 +392,16 @@
             </label>
             <div class="hint">Leave off for normal app endpoints. Turn on only when the endpoint is guardrail-only or no-op.</div>
           </div>
+          <div>
+            <label for="rate-limit-delay">Delay between prompts</label>
+            <input id="rate-limit-delay" type="number" min="0" max="60000" step="500" value="1000">
+            <div class="hint">Milliseconds. Increase this if the target returns 429.</div>
+          </div>
+          <div>
+            <label for="rate-limit-retries">429 retries</label>
+            <input id="rate-limit-retries" type="number" min="0" max="10" step="1" value="2">
+            <div class="hint">Retries per prompt when the target rate-limits the request.</div>
+          </div>
           <div class="field-full">
             <label for="guardrail-headers">Headers</label>
             <textarea id="guardrail-headers" placeholder="Authorization: Bearer token"></textarea>
@@ -431,6 +441,8 @@ cannot comply</textarea>
         bodyTemplate: document.getElementById('guardrail-body'),
         promptFile: document.getElementById('prompt-file'),
         executeAllowedPrompts: document.getElementById('execute-allowed-prompts'),
+        rateLimitDelayMs: document.getElementById('rate-limit-delay'),
+        rateLimitRetries: document.getElementById('rate-limit-retries'),
         headers: document.getElementById('guardrail-headers'),
         expectedSignals: document.getElementById('guardrail-signals')
       };
@@ -572,6 +584,7 @@ cannot comply</textarea>
             <td>${escapeHtml(item.expected)}</td>
             <td>${pill(item.result, item.result === 'skipped' ? 'medium' : item.passed ? 'pass' : item.result === 'warning' ? 'medium' : 'fail')}</td>
             <td>${escapeHtml(item.status || '')}</td>
+            <td>${escapeHtml(item.attempts || '')}</td>
             <td>${escapeHtml(item.reason || '')}</td>
           </tr>`);
         reportEl.innerHTML = `
@@ -594,7 +607,7 @@ cannot comply</textarea>
           </section>
           <section class="report-card">
             <h2>Prompt Results</h2>
-            ${renderTable(['Prompt', 'Type', 'Severity', 'Expected', 'Result', 'HTTP', 'Reason'], rows, 'No prompt tests were executed.')}
+            ${renderTable(['Prompt', 'Type', 'Severity', 'Expected', 'Result', 'HTTP', 'Attempts', 'Reason'], rows, 'No prompt tests were executed.')}
           </section>
         `;
       }
@@ -673,6 +686,8 @@ cannot comply</textarea>
               promptFileName,
               promptFileContentBase64,
               executeAllowedPrompts: guardrailFields.executeAllowedPrompts.checked,
+              rateLimitDelayMs: guardrailFields.rateLimitDelayMs.value,
+              rateLimitRetries: guardrailFields.rateLimitRetries.value,
               headers: guardrailFields.headers.value,
               expectedSignals: guardrailFields.expectedSignals.value
             })
