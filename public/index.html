@@ -72,6 +72,7 @@
         display: grid;
         grid-template-columns: minmax(280px, 380px) minmax(0, 1fr);
         gap: 24px;
+        align-items: start;
       }
       section {
         min-width: 0;
@@ -82,8 +83,17 @@
         background: #fff;
         padding: 20px;
         box-shadow: 0 1px 0 rgba(31, 31, 31, 0.05);
+        align-self: start;
       }
-      .stack { display: grid; gap: 14px; }
+      .stack {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        align-items: stretch;
+      }
+      .stack > * {
+        flex: 0 0 auto;
+      }
       .field-grid {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -106,10 +116,21 @@
       }
       input[type="file"] {
         width: 100%;
-        padding: 12px;
+        min-height: 44px;
+        padding: 9px 10px;
         border: 1px dashed #b8ada2;
         border-radius: 4px;
         background: var(--panel);
+      }
+      .check-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 0;
+        line-height: 1.35;
+      }
+      .check-row input {
+        flex: 0 0 auto;
       }
       input[type="text"],
       input[type="number"],
@@ -132,6 +153,8 @@
       }
       button {
         width: 100%;
+        min-height: 44px;
+        height: 44px;
         border: 0;
         border-radius: 4px;
         background: var(--accent-dark);
@@ -140,6 +163,9 @@
         font-size: 14px;
         font-weight: 700;
         cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
       }
       button:hover:not(:disabled) {
         background: var(--burgundy);
@@ -161,6 +187,8 @@
         display: grid;
         grid-template-columns: repeat(4, minmax(0, 1fr));
         gap: 10px;
+        align-items: start;
+        width: 100%;
       }
       .metric {
         border: 1px solid var(--line);
@@ -168,6 +196,8 @@
         padding: 12px;
         background: #fff;
         border-top: 4px solid var(--accent);
+        min-height: 76px;
+        height: auto;
       }
       .metric:nth-child(1) { border-top-color: var(--burgundy); }
       .metric:nth-child(2) { border-top-color: var(--red); }
@@ -303,7 +333,8 @@
         align-items: center;
         justify-content: space-between;
         gap: 12px;
-        min-height: 38px;
+        min-height: 44px;
+        height: 44px;
         padding: 9px 11px;
         border: 1px solid var(--line);
         border-left: 4px solid var(--accent-dark);
@@ -311,6 +342,7 @@
         background: #fff;
         color: var(--ink);
         text-decoration: none;
+        overflow: hidden;
       }
       .links a:hover {
         border-left-color: var(--burgundy);
@@ -386,9 +418,9 @@
             <div class="hint">Optional. TXT uses one prompt per line. CSV/JSON can include prompt, expected, severity, and name.</div>
           </div>
           <div class="field-full">
-            <label>
+            <label class="check-row">
               <input id="execute-allowed-prompts" type="checkbox">
-              Execute allowed prompts against target endpoint
+              <span>Execute allowed prompts against target endpoint</span>
             </label>
             <div class="hint">Leave off for normal app endpoints. Turn on only when the endpoint is guardrail-only or no-op.</div>
           </div>

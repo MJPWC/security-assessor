@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import tarfile
 import time
+import traceback
 import urllib.error
 import urllib.request
 import uuid
@@ -615,12 +616,32 @@ def normalize_uploaded_prompt(item, index):
         raise ValueError(f"Prompt item {index} does not contain prompt text.")
     prompt_type = str(item.get("type") or item.get("category") or "").strip().lower()
     expected = str(item.get("expected") or "").strip().lower()
-    if expected in {"pass", "passed", "accept", "accepted"}:
+    expected_key = re.sub(r"[^a-z0-9]+", "-", expected).strip("-")
+    if expected in {"pass", "passed", "accept", "accepted", "allow", "allowed", "good", "safe", "normal"}:
         expected = "allowed"
-    if expected in {"block", "blocked", "deny", "denied", "reject", "rejected"}:
+    if expected_key in {
+        "block",
+        "blocked",
+        "blocked-or-sanitized",
+        "blocked-or-redacted",
+        "deny",
+        "denied",
+        "reject",
+        "rejected",
+        "refuse",
+        "refused",
+        "sanitize",
+        "sanitized",
+        "redact",
+        "redacted",
+        "bad",
+        "unsafe",
+        "restricted",
+        "malicious",
+    }:
         expected = "blocked"
     if not expected:
-        expected = "allowed" if prompt_type == "allowed" else "blocked"
+        expected = "allowed" if prompt_type in {"allowed", "good", "safe", "normal"} else "blocked"
     if expected not in {"blocked", "allowed"}:
         raise ValueError(f"Prompt item {index} has unsupported expected value: {expected}")
     prompt_type = "allowed" if expected == "allowed" else "restricted"
@@ -762,8 +783,22 @@ def send_guardrail_prompt(config, prompt):
                 continue
             return {"ok": False, "status": exc.code, "body": redact_text(body), "error": redact_text(str(exc)), "attempts": attempt + 1}
         except Exception as exc:
-            return {"ok": False, "status": None, "body": "", "error": redact_text(str(exc)), "attempts": attempt + 1}
+            return {"ok": False, "status": None, "body": "", "error": target_request_error_message(exc), "attempts": attempt + 1}
     return {"ok": False, "status": None, "body": "", "error": "Request failed after retry loop.", "attempts": attempts}
+
+
+def target_request_error_message(exc):
+    text = str(exc)
+    lower = text.lower()
+    if "connection refused" in lower or "errno 61" in lower or "errno 111" in lower:
+        return "Target endpoint was unreachable: connection refused. Confirm the target app is running, the host/port is correct, and the endpoint is listening."
+    if "timed out" in lower or "timeout" in lower:
+        return "Target endpoint timed out. Confirm the target app is responsive or increase the timeout."
+    if "name or service not known" in lower or "nodename nor servname" in lower or "temporary failure in name resolution" in lower:
+        return "Target host could not be resolved. Check the target URL hostname."
+    if "network is unreachable" in lower or "no route to host" in lower:
+        return "Target host is not reachable from the Security Assessor machine. Check network, firewall, VPN, or cloud security group rules."
+    return redact_text(text)
 
 
 def guardrail_decision(failure_count, warning_count):
@@ -1490,7 +1525,11 @@ class Handler(SimpleHTTPRequestHandler):
                 "excelPath": result["excelPath"],
             })
         except Exception as exc:
-            self.send_json(HTTPStatus.BAD_REQUEST, {"error": redact_text(str(exc))})
+            traceback.print_exc()
+            self.send_json(HTTPStatus.BAD_REQUEST, {
+                "error": "Security Assessor request failed: " + redact_text(str(exc)),
+                "route": self.path,
+            })
 
     def do_GET(self):
         match = re.match(r"^/api/reports/([^/]+)/(report\.md|report\.json|report\.xlsx|sbom\.json|guardrail-report\.md|guardrail-report\.json|guardrail-report\.xlsx)$", self.path)
