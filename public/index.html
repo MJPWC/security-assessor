@@ -386,6 +386,13 @@
             <div class="hint">Optional. TXT uses one prompt per line. CSV/JSON can include prompt, expected, severity, and name.</div>
           </div>
           <div class="field-full">
+            <label>
+              <input id="execute-allowed-prompts" type="checkbox">
+              Execute allowed prompts against target endpoint
+            </label>
+            <div class="hint">Leave off for normal app endpoints. Turn on only when the endpoint is guardrail-only or no-op.</div>
+          </div>
+          <div class="field-full">
             <label for="guardrail-headers">Headers</label>
             <textarea id="guardrail-headers" placeholder="Authorization: Bearer token"></textarea>
           </div>
@@ -423,6 +430,7 @@ cannot comply</textarea>
         method: document.getElementById('guardrail-method'),
         bodyTemplate: document.getElementById('guardrail-body'),
         promptFile: document.getElementById('prompt-file'),
+        executeAllowedPrompts: document.getElementById('execute-allowed-prompts'),
         headers: document.getElementById('guardrail-headers'),
         expectedSignals: document.getElementById('guardrail-signals')
       };
@@ -562,7 +570,7 @@ cannot comply</textarea>
             <td>${escapeHtml(item.type)}</td>
             <td>${pill(item.severity, item.severity)}</td>
             <td>${escapeHtml(item.expected)}</td>
-            <td>${pill(item.result, item.passed ? 'pass' : item.result === 'warning' ? 'medium' : 'fail')}</td>
+            <td>${pill(item.result, item.result === 'skipped' ? 'medium' : item.passed ? 'pass' : item.result === 'warning' ? 'medium' : 'fail')}</td>
             <td>${escapeHtml(item.status || '')}</td>
             <td>${escapeHtml(item.reason || '')}</td>
           </tr>`);
@@ -579,6 +587,7 @@ cannot comply</textarea>
                 <dt>Restricted failed</dt><dd>${escapeHtml(summary.restrictedFailed || 0)}</dd>
                 <dt>Allowed passed</dt><dd>${escapeHtml(summary.allowedPassed || 0)}</dd>
                 <dt>Allowed failed</dt><dd>${escapeHtml(summary.allowedFailed || 0)}</dd>
+                <dt>Allowed skipped</dt><dd>${escapeHtml(summary.allowedSkipped || 0)}</dd>
                 <dt>Warnings</dt><dd>${escapeHtml(summary.warnings || 0)}</dd>
               </dl>
             </div>
@@ -650,7 +659,9 @@ cannot comply</textarea>
             promptFileName = promptFile.name;
             promptFileContentBase64 = arrayBufferToBase64(await promptFile.arrayBuffer());
           }
-          setStatus('Sending restricted and allowed prompts to running app...');
+          setStatus(guardrailFields.executeAllowedPrompts.checked
+            ? 'Sending restricted and allowed prompts to running app...'
+            : 'Sending restricted prompts only. Allowed prompts will be skipped.');
           const response = await fetch('/api/guardrail-test', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -661,6 +672,7 @@ cannot comply</textarea>
               bodyTemplate: guardrailFields.bodyTemplate.value,
               promptFileName,
               promptFileContentBase64,
+              executeAllowedPrompts: guardrailFields.executeAllowedPrompts.checked,
               headers: guardrailFields.headers.value,
               expectedSignals: guardrailFields.expectedSignals.value
             })

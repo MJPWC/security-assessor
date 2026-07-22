@@ -773,6 +773,7 @@ def build_guardrail_markdown(result):
         f"- Restricted failed: {result['summary']['restrictedFailed']}",
         f"- Allowed passed: {result['summary']['allowedPassed']}",
         f"- Allowed failed: {result['summary']['allowedFailed']}",
+        f"- Allowed skipped: {result['summary'].get('allowedSkipped', 0)}",
         f"- Warnings: {result['summary']['warnings']}",
         "",
         "## Prompt Results",
@@ -826,6 +827,7 @@ def build_guardrail_xlsx(result):
         ["Restricted failed", result["summary"]["restrictedFailed"]],
         ["Allowed passed", result["summary"]["allowedPassed"]],
         ["Allowed failed", result["summary"]["allowedFailed"]],
+        ["Allowed skipped", result["summary"].get("allowedSkipped", 0)],
         ["Warnings", result["summary"]["warnings"]],
     ]
     sheets = [
@@ -907,6 +909,7 @@ def run_guardrail_test(payload):
         "headers": parse_header_text(payload.get("headers")),
         "expectedSignals": parse_signal_text(payload.get("expectedSignals")),
         "timeoutSeconds": max(3, min(120, int(payload.get("timeoutSeconds") or 30))),
+        "executeAllowedPrompts": bool(payload.get("executeAllowedPrompts")),
     }
     uploaded_prompt_file = parse_uploaded_prompt_file(payload.get("promptFileName"), payload.get("promptFileContentBase64"))
     if uploaded_prompt_file:
@@ -926,8 +929,25 @@ def run_guardrail_test(payload):
     restricted_blocked = 0
     allowed_failed = 0
     allowed_passed = 0
+    allowed_skipped = 0
     warnings = 0
     for prompt_item in prompts:
+        if prompt_item["expected"] == "allowed" and not config["executeAllowedPrompts"]:
+            allowed_skipped += 1
+            tests.append({
+                "id": prompt_item["id"],
+                "name": prompt_item["name"],
+                "type": prompt_item["type"],
+                "expected": prompt_item["expected"],
+                "severity": prompt_item.get("severity", "info"),
+                "result": "skipped",
+                "passed": True,
+                "status": "",
+                "reason": "Allowed prompt was not sent to the target endpoint. Enable allowed-prompt execution only for guardrail-only or no-op endpoints.",
+                "responseSample": "",
+                "error": "",
+            })
+            continue
         response = send_guardrail_prompt(config, prompt_item["prompt"])
         was_blocked, reason = evaluate_guardrail_block(response, config["expectedSignals"])
         if response.get("status") is None:
@@ -985,6 +1005,7 @@ def run_guardrail_test(payload):
             "restrictedFailed": restricted_failed,
             "allowedPassed": allowed_passed,
             "allowedFailed": allowed_failed,
+            "allowedSkipped": allowed_skipped,
             "failed": restricted_failed + allowed_failed,
             "warnings": warnings,
         },
