@@ -21,6 +21,8 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from xml.sax.saxutils import escape
 
+from quality_assessor import assess_quality
+
 APP_DIR = Path(__file__).resolve().parent
 PUBLIC_DIR = APP_DIR / "public"
 RUNS_DIR = APP_DIR / "output" / "security-assessor" / "runs"
@@ -575,6 +577,27 @@ def run_llm_review(assessment):
         ]))
     except Exception as exc:
         return "LLM review unavailable: " + redact_text(str(exc))
+
+
+def run_quality_llm_review(payload):
+    safe_payload = redact_value(payload)
+    try:
+        return redact_text(call_llm([
+            {
+                "role": "system",
+                "content": (
+                    "You are a senior code quality reviewer. Review the provided static quality findings and bounded redacted code samples. "
+                    "Focus on maintainability, reliability, readability, testability, and practical refactoring recommendations. "
+                    "Do not request secrets or full source code. Return concise Markdown with top risks, quick wins, and next checks."
+                ),
+            },
+            {
+                "role": "user",
+                "content": "Review this code quality assessment context:\n\n" + json.dumps(safe_payload, indent=2),
+            },
+        ]))
+    except Exception as exc:
+        return "LLM quality review unavailable: " + redact_text(str(exc))
 
 
 def load_prompt_file(path, default_severity="info"):
@@ -1488,12 +1511,29 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
-        if self.path not in {"/api/assess", "/api/guardrail-test"}:
+        if self.path not in {"/api/assess", "/api/guardrail-test", "/api/quality-assess"}:
             self.send_json(HTTPStatus.NOT_FOUND, {"error": "Route not found."})
             return
         try:
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            if self.path == "/api/quality-assess":
+                llm_reviewer = run_quality_llm_review if payload.get("useLlmReview") else None
+                result = assess_quality(payload.get("fileName"), payload.get("contentBase64"), RUNS_DIR, llm_reviewer=llm_reviewer)
+                self.send_json(HTTPStatus.OK, {
+                    "runId": result["runId"],
+                    "decision": result["decision"],
+                    "score": result["score"],
+                    "findingCounts": result["findingCounts"],
+                    "findings": result["findings"],
+                    "metrics": result["metrics"],
+                    "llmReview": result["llmReview"],
+                    "reportMarkdown": result["reportMarkdown"],
+                    "markdownPath": result["markdownPath"],
+                    "jsonPath": result["jsonPath"],
+                    "excelPath": result["excelPath"],
+                })
+                return
             if self.path == "/api/guardrail-test":
                 result = run_guardrail_test(payload)
                 self.send_json(HTTPStatus.OK, {
@@ -1526,13 +1566,14 @@ class Handler(SimpleHTTPRequestHandler):
             })
         except Exception as exc:
             traceback.print_exc()
+            label = "Quality Assessor" if self.path == "/api/quality-assess" else "Security Assessor"
             self.send_json(HTTPStatus.BAD_REQUEST, {
-                "error": "Security Assessor request failed: " + redact_text(str(exc)),
+                "error": f"{label} request failed: " + redact_text(str(exc)),
                 "route": self.path,
             })
 
     def do_GET(self):
-        match = re.match(r"^/api/reports/([^/]+)/(report\.md|report\.json|report\.xlsx|sbom\.json|guardrail-report\.md|guardrail-report\.json|guardrail-report\.xlsx)$", self.path)
+        match = re.match(r"^/api/reports/([^/]+)/(report\.md|report\.json|report\.xlsx|sbom\.json|guardrail-report\.md|guardrail-report\.json|guardrail-report\.xlsx|quality-report\.md|quality-report\.json|quality-report\.xlsx)$", self.path)
         if match:
             run_id, file_name = match.groups()
             file_path = (RUNS_DIR / run_id / file_name).resolve()

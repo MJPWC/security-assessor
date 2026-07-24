@@ -102,6 +102,24 @@
       .field-full {
         grid-column: 1 / -1;
       }
+      .mode-tabs {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+      .mode-tab {
+        border: 1px solid var(--line);
+        background: #fff;
+        color: var(--ink);
+      }
+      .mode-tab.active {
+        border-color: var(--accent-dark);
+        background: var(--accent-dark);
+        color: #fff;
+      }
+      .is-hidden {
+        display: none !important;
+      }
       .hint {
         margin-top: 5px;
         color: var(--muted);
@@ -377,10 +395,15 @@
     </header>
     <main>
       <section class="panel stack">
+        <div class="mode-tabs" aria-label="Assessment type">
+          <button class="mode-tab active" id="security-mode-button" type="button">Security</button>
+          <button class="mode-tab" id="quality-mode-button" type="button">Quality</button>
+        </div>
         <div>
           <label for="artifact">Upload application package</label>
           <input id="artifact" type="file" accept=".jar,.war,.zip,.tgz,.tar,.gz,.whl,.py,.js,.json">
         </div>
+        <div id="security-controls" class="stack">
         <button id="scan">Run Security Assessment</button>
         <div class="status" id="status">Select a Node.js, Python, JAR, WAR, ZIP, TAR, TGZ, or wheel package.</div>
         <div class="summary">
@@ -450,6 +473,25 @@ cannot comply</textarea>
         </div>
         <button id="guardrail-scan">Run Prompt Guardrail Test</button>
         <div class="links" id="guardrail-links"></div>
+        </div>
+        <div id="quality-controls" class="stack is-hidden">
+          <div>
+            <label class="check-row">
+              <input id="quality-llm-review" type="checkbox">
+              <span>Use LLM for quality review</span>
+            </label>
+            <div class="hint">Sends static findings and bounded redacted code samples to the configured LLM provider.</div>
+          </div>
+          <button id="quality-scan">Run Quality Assessment</button>
+          <div class="status" id="quality-status">Quality checks run separately from security checks and do not call the prompt guardrail flow.</div>
+          <div class="summary">
+            <div class="metric"><b id="quality-score">0</b><span>Score</span></div>
+            <div class="metric"><b id="quality-high">0</b><span>High</span></div>
+            <div class="metric"><b id="quality-medium">0</b><span>Medium</span></div>
+            <div class="metric"><b id="quality-low">0</b><span>Low</span></div>
+          </div>
+          <div class="links" id="quality-links"></div>
+        </div>
       </section>
       <section class="stack">
         <div id="report" class="report-view">
@@ -459,10 +501,17 @@ cannot comply</textarea>
     </main>
     <script>
       const fileInput = document.getElementById('artifact');
+      const securityModeButton = document.getElementById('security-mode-button');
+      const qualityModeButton = document.getElementById('quality-mode-button');
+      const securityControls = document.getElementById('security-controls');
+      const qualityControls = document.getElementById('quality-controls');
       const scanButton = document.getElementById('scan');
+      const qualityButton = document.getElementById('quality-scan');
       const statusEl = document.getElementById('status');
+      const qualityStatusEl = document.getElementById('quality-status');
       const reportEl = document.getElementById('report');
       const linksEl = document.getElementById('links');
+      const qualityLinksEl = document.getElementById('quality-links');
       const guardrailLinksEl = document.getElementById('guardrail-links');
       const decisionEl = document.getElementById('decision');
       const guardrailButton = document.getElementById('guardrail-scan');
@@ -484,6 +533,23 @@ cannot comply</textarea>
         medium: document.getElementById('medium'),
         low: document.getElementById('low')
       };
+      const qualityCounters = {
+        score: document.getElementById('quality-score'),
+        high: document.getElementById('quality-high'),
+        medium: document.getElementById('quality-medium'),
+        low: document.getElementById('quality-low'),
+        useLlmReview: document.getElementById('quality-llm-review')
+      };
+
+      function setMode(mode) {
+        const qualityMode = mode === 'quality';
+        securityControls.classList.toggle('is-hidden', qualityMode);
+        qualityControls.classList.toggle('is-hidden', !qualityMode);
+        securityModeButton.classList.toggle('active', !qualityMode);
+        qualityModeButton.classList.toggle('active', qualityMode);
+        setDecision('No assessment yet');
+        reportEl.innerHTML = `<div class="report-empty">${qualityMode ? 'Quality report will appear here after the scan completes.' : 'Security report will appear here after the scan completes.'}</div>`;
+      }
 
       function setStatus(message) {
         statusEl.textContent = message;
@@ -530,6 +596,18 @@ cannot comply</textarea>
           `<a href="/api/reports/${runId}/guardrail-report.xlsx" download="guardrail-test-${runId}.xlsx">Guardrail Excel</a>`,
           `<a href="/api/reports/${runId}/guardrail-report.md" download="guardrail-test-${runId}.md">Guardrail Markdown</a>`,
           `<a href="/api/reports/${runId}/guardrail-report.json" download="guardrail-test-${runId}.json">Guardrail JSON</a>`
+        ].join('');
+      }
+
+      function renderQualityLinks(runId) {
+        if (!runId) {
+          qualityLinksEl.innerHTML = '';
+          return;
+        }
+        qualityLinksEl.innerHTML = [
+          `<a href="/api/reports/${runId}/quality-report.xlsx" download="quality-assessment-${runId}.xlsx">Quality Excel</a>`,
+          `<a href="/api/reports/${runId}/quality-report.md" download="quality-assessment-${runId}.md">Quality Markdown</a>`,
+          `<a href="/api/reports/${runId}/quality-report.json" download="quality-assessment-${runId}.json">Quality JSON</a>`
         ].join('');
       }
 
@@ -644,6 +722,47 @@ cannot comply</textarea>
         `;
       }
 
+      function renderQualityReport(payload) {
+        const counts = payload.findingCounts || {};
+        const metrics = payload.metrics || {};
+        const rows = (payload.findings || []).map(item => `
+          <tr>
+            <td>${pill(item.severity, item.severity)}</td>
+            <td>${escapeHtml(item.category)}</td>
+            <td>${escapeHtml(item.title)}</td>
+            <td>${escapeHtml(item.file || '')}</td>
+            <td>${escapeHtml(item.line || '')}</td>
+            <td>${escapeHtml(item.details || '')}</td>
+          </tr>`);
+        reportEl.innerHTML = `
+          <section class="report-card">
+            <h2>Quality Assessment Summary</h2>
+            <div class="card-body">
+              <dl class="kv">
+                <dt>Run ID</dt><dd>${escapeHtml(payload.runId)}</dd>
+                <dt>Decision</dt><dd>${pill(payload.decision || 'Unknown', String(payload.decision || '').includes('failed') ? 'fail' : String(payload.decision || '').includes('Review') ? 'medium' : 'pass')}</dd>
+                <dt>Quality score</dt><dd>${escapeHtml(payload.score || 0)}/100</dd>
+                <dt>Text files</dt><dd>${escapeHtml(metrics.textFiles || 0)}</dd>
+                <dt>Source files</dt><dd>${escapeHtml(metrics.sourceFiles || 0)}</dd>
+                <dt>Test files</dt><dd>${escapeHtml(metrics.testFiles || 0)}</dd>
+                <dt>Findings</dt><dd>High ${counts.high || 0} · Medium ${counts.medium || 0} · Low ${counts.low || 0}</dd>
+              </dl>
+            </div>
+          </section>
+          <section class="report-card">
+            <h2>LLM Quality Review</h2>
+            <div class="card-body">${escapeHtml(payload.llmReview || 'LLM review was not requested or no provider was configured.')}</div>
+          </section>
+          <section class="report-card">
+            <h2>Quality Findings</h2>
+            ${renderTable(['Severity', 'Category', 'Title', 'File', 'Line', 'Details'], rows, 'No quality findings were reported.')}
+          </section>
+        `;
+      }
+
+      securityModeButton.addEventListener('click', () => setMode('security'));
+      qualityModeButton.addEventListener('click', () => setMode('quality'));
+
       scanButton.addEventListener('click', async () => {
         const file = fileInput.files && fileInput.files[0];
         if (!file) {
@@ -736,6 +855,51 @@ cannot comply</textarea>
           setStatus('Prompt guardrail test failed. Check target URL, endpoint, and request body.');
         } finally {
           guardrailButton.disabled = false;
+        }
+      });
+
+      qualityButton.addEventListener('click', async () => {
+        const file = fileInput.files && fileInput.files[0];
+        if (!file) {
+          qualityStatusEl.textContent = 'Please select a package first.';
+          return;
+        }
+        qualityButton.disabled = true;
+        reportEl.innerHTML = '<div class="report-empty">Running quality assessment...</div>';
+        renderQualityLinks();
+        setDecision('Running');
+        Object.values(qualityCounters).forEach(el => { el.textContent = '0'; });
+        try {
+          qualityStatusEl.textContent = 'Reading upload in browser...';
+          const contentBase64 = arrayBufferToBase64(await file.arrayBuffer());
+          qualityStatusEl.textContent = qualityCounters.useLlmReview.checked
+            ? 'Uploading, running quality checks, and requesting LLM review...'
+            : 'Uploading and running quality checks...';
+          const response = await fetch('/api/quality-assess', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              fileName: file.name,
+              contentBase64,
+              useLlmReview: qualityCounters.useLlmReview.checked
+            })
+          });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.error || 'Quality assessment failed.');
+          setDecision(payload.decision);
+          qualityCounters.score.textContent = payload.score || 0;
+          qualityCounters.high.textContent = payload.findingCounts?.high || 0;
+          qualityCounters.medium.textContent = payload.findingCounts?.medium || 0;
+          qualityCounters.low.textContent = payload.findingCounts?.low || 0;
+          renderQualityReport(payload);
+          renderQualityLinks(payload.runId);
+          qualityStatusEl.textContent = `Completed quality run ${payload.runId}. Score: ${payload.score || 0}/100.`;
+        } catch (error) {
+          setDecision('Failed');
+          reportEl.innerHTML = `<div class="report-empty">${escapeHtml(error.message)}</div>`;
+          qualityStatusEl.textContent = 'Quality assessment failed. Check the selected package and try again.';
+        } finally {
+          qualityButton.disabled = false;
         }
       });
     </script>
