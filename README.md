@@ -11,8 +11,19 @@ This is a Python MVP web app for assessing deployable application packages befor
 - `npm audit` for every package folder that has both `package.json` and `package-lock.json`, including nested frontend apps such as `client/`.
 - CycloneDX-lite SBOM generation.
 - LLM security review using the same backend LLM configuration as MuleGenie.
+- Optional LLM quality review using the same backend LLM configuration.
 
-The LLM receives only redacted assessment metadata, not the raw uploaded package contents.
+The security LLM receives only redacted assessment metadata, not the raw uploaded package contents. Quality LLM review receives static quality findings plus bounded redacted code samples.
+
+## LLM Configuration
+
+Security and quality use the same LLM config:
+
+```env
+OPENAI_API_KEY=your_key_here
+OPENAI_MODEL=gpt-4o-mini
+LLM_PROVIDER=openai
+```
 
 ## Run
 

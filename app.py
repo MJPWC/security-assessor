@@ -62,7 +62,7 @@ SENSITIVE_KEY_RE = re.compile(r"(api[_-]?key|apikey|token|secret|password|client
 DEFAULT_BLOCK_SIGNALS = ["blocked", "warning", "not allowed", "restricted", "policy", "cannot comply", "i can't help", "unauthorized", "forbidden"]
 BLOCKING_HTTP_STATUSES = {400, 401, 403, 406, 409, 422, 429}
 
-def load_env_file(path):
+def load_env_file(path, override=False):
     if not path.exists():
         return
     for line in path.read_text(errors="ignore").splitlines():
@@ -70,11 +70,15 @@ def load_env_file(path):
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
         key, value = stripped.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+        key = key.strip()
+        if override or key not in os.environ:
+            os.environ[key] = value.strip().strip('"').strip("'")
 
 
-for env_name in [".env", ".env.local", ".env.private"]:
-    load_env_file(APP_DIR / env_name)
+for env_dir in [APP_DIR.parent / "muleGenie", APP_DIR]:
+    load_env_file(env_dir / ".env")
+    load_env_file(env_dir / ".env.local", override=True)
+    load_env_file(env_dir / ".env.private", override=True)
 
 
 def redact_text(value):
@@ -511,12 +515,23 @@ def create_sbom(artifact, components):
 
 
 def provider_configs():
+    def usable_key(*names):
+        for name in names:
+            value = os.getenv(name) or ""
+            lower = value.lower()
+            if not value:
+                continue
+            if any(marker in lower for marker in ["__replace", "replace_me", "your_", "placeholder", "change_me", "changeme", "dummy", "example"]):
+                continue
+            return value
+        return ""
+
     configs = [
-        ("anthropic", os.getenv("ANTHROPIC_API_KEY"), os.getenv("ANTHROPIC_MODEL", "claude-3-7-sonnet-20250219")),
-        ("groq", os.getenv("GROQ_API_KEY"), os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")),
-        ("openai", os.getenv("OPENAI_API_KEY"), os.getenv("OPENAI_MODEL", "gpt-4o-mini")),
-        ("gemini", os.getenv("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY_1"), os.getenv("GEMINI_MODEL", "gemini-2.0-flash")),
-        ("openrouter", os.getenv("OPENROUTER_API_KEY"), os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.1-8b-instruct")),
+        ("anthropic", usable_key("ANTHROPIC_API_KEY"), os.getenv("ANTHROPIC_MODEL", "claude-3-7-sonnet-20250219")),
+        ("groq", usable_key("GROQ_API_KEY"), os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")),
+        ("openai", usable_key("OPENAI_API_KEY"), os.getenv("OPENAI_MODEL", "gpt-4o-mini")),
+        ("gemini", usable_key("GEMINI_API_KEY", "GEMINI_API_KEY_1", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3", "GEMINI_API_KEY_4"), os.getenv("GEMINI_MODEL", "gemini-2.0-flash")),
+        ("openrouter", usable_key("OPENROUTER_API_KEY"), os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.1-8b-instruct")),
     ]
     available = [item for item in configs if item[1]]
     preferred = os.getenv("LLM_PROVIDER", "").lower()
@@ -526,34 +541,47 @@ def provider_configs():
 
 def http_json(url, headers, body):
     request = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
-    with urllib.request.urlopen(request, timeout=60) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read(4000).decode("utf-8", errors="ignore")
+        raise RuntimeError(f"HTTP {exc.code}: {redact_text(error_body or exc.reason)}") from exc
 
 
-def call_llm(messages):
+def join_url(base_url, path):
+    return str(base_url or "").rstrip("/") + "/" + str(path or "").lstrip("/")
+
+
+def call_llm(messages, providers=None, config_label="LLM"):
     errors = []
-    for provider, api_key, model in provider_configs():
+    providers = provider_configs() if providers is None else providers
+    if not providers:
+        raise RuntimeError(f"No {config_label} provider is configured. Set one of OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, GROQ_API_KEY, or OPENROUTER_API_KEY in .env, .env.local, .env.private, or the server environment, then restart the app.")
+    for provider, api_key, model in providers:
         try:
             if provider == "anthropic":
+                endpoint = join_url(os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com"), "/v1/messages")
                 data = http_json(
-                    "https://api.anthropic.com/v1/messages",
+                    endpoint,
                     {"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": os.getenv("ANTHROPIC_API_VERSION", "2023-06-01")},
                     {"model": model, "system": messages[0]["content"], "messages": messages[1:], "temperature": 0.2, "max_tokens": 900},
                 )
                 return "\n".join(part.get("text", "") for part in data.get("content", []))
             if provider == "gemini":
+                base_url = os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com")
                 data = http_json(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}",
+                    f"{join_url(base_url, f'/v1beta/models/{model}:generateContent')}?key={api_key}",
                     {"Content-Type": "application/json"},
                     {"contents": [{"role": "user", "parts": [{"text": "\n\n".join(message["content"] for message in messages)}]}], "generationConfig": {"temperature": 0.2, "maxOutputTokens": 900}},
                 )
                 return "\n".join(part.get("text", "") for part in data.get("candidates", [{}])[0].get("content", {}).get("parts", []))
-            endpoint = "https://api.openai.com/v1/chat/completions"
+            endpoint = join_url(os.getenv("OPENAI_BASE_URL", "https://api.openai.com"), "/v1/chat/completions")
             headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
             if provider == "groq":
-                endpoint = "https://api.groq.com/openai/v1/chat/completions"
+                endpoint = join_url(os.getenv("GROQ_BASE_URL", "https://api.groq.com"), "/openai/v1/chat/completions")
             if provider == "openrouter":
-                endpoint = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1/chat/completions")
+                endpoint = join_url(os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"), "/chat/completions")
             data = http_json(endpoint, headers, {"model": model, "messages": messages, "temperature": 0.2, "max_tokens": 900})
             return data.get("choices", [{}])[0].get("message", {}).get("content", "")
         except Exception as exc:
@@ -595,9 +623,17 @@ def run_quality_llm_review(payload):
                 "role": "user",
                 "content": "Review this code quality assessment context:\n\n" + json.dumps(safe_payload, indent=2),
             },
-        ]))
+        ], config_label="Quality LLM"))
     except Exception as exc:
         return "LLM quality review unavailable: " + redact_text(str(exc))
+
+
+def llm_status(providers=None):
+    providers = provider_configs() if providers is None else providers
+    return {
+        "configured": bool(providers),
+        "providers": [provider for provider, _, _ in providers],
+    }
 
 
 def load_prompt_file(path, default_severity="info"):
@@ -1528,6 +1564,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "findings": result["findings"],
                     "metrics": result["metrics"],
                     "llmReview": result["llmReview"],
+                    "llmStatus": llm_status(),
                     "reportMarkdown": result["reportMarkdown"],
                     "markdownPath": result["markdownPath"],
                     "jsonPath": result["jsonPath"],
@@ -1573,6 +1610,11 @@ class Handler(SimpleHTTPRequestHandler):
             })
 
     def do_GET(self):
+        if self.path == "/.well-known/appspecific/com.chrome.devtools.json":
+            self.send_response(HTTPStatus.NO_CONTENT)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         match = re.match(r"^/api/reports/([^/]+)/(report\.md|report\.json|report\.xlsx|sbom\.json|guardrail-report\.md|guardrail-report\.json|guardrail-report\.xlsx|quality-report\.md|quality-report\.json|quality-report\.xlsx)$", self.path)
         if match:
             run_id, file_name = match.groups()

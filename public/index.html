@@ -480,7 +480,7 @@ cannot comply</textarea>
               <input id="quality-llm-review" type="checkbox">
               <span>Use LLM for quality review</span>
             </label>
-            <div class="hint">Sends static findings and bounded redacted code samples to the configured LLM provider.</div>
+            <div class="hint">Uses the same LLM provider config as the security assessment.</div>
           </div>
           <button id="quality-scan">Run Quality Assessment</button>
           <div class="status" id="quality-status">Quality checks run separately from security checks and do not call the prompt guardrail flow.</div>
@@ -725,6 +725,7 @@ cannot comply</textarea>
       function renderQualityReport(payload) {
         const counts = payload.findingCounts || {};
         const metrics = payload.metrics || {};
+        const llmStatus = payload.llmStatus || {};
         const rows = (payload.findings || []).map(item => `
           <tr>
             <td>${pill(item.severity, item.severity)}</td>
@@ -745,6 +746,7 @@ cannot comply</textarea>
                 <dt>Text files</dt><dd>${escapeHtml(metrics.textFiles || 0)}</dd>
                 <dt>Source files</dt><dd>${escapeHtml(metrics.sourceFiles || 0)}</dd>
                 <dt>Test files</dt><dd>${escapeHtml(metrics.testFiles || 0)}</dd>
+                <dt>LLM provider</dt><dd>${escapeHtml(llmStatus.configured ? (llmStatus.providers || []).join(', ') : 'Not configured')}</dd>
                 <dt>Findings</dt><dd>High ${counts.high || 0} · Medium ${counts.medium || 0} · Low ${counts.low || 0}</dd>
               </dl>
             </div>
