@@ -489,12 +489,19 @@ def run_quality_llm_review(payload):
                 "content": (
                     "You are a senior code quality reviewer. Review the provided static quality findings and bounded redacted code samples. "
                     "Focus on maintainability, reliability, readability, testability, and practical refactoring recommendations. "
-                    "Do not request secrets or full source code. Return concise Markdown with top risks, quick wins, and next checks."
+                    "Do not request secrets or full source code. Return only structured Markdown, not a single paragraph. "
+                    "Use exactly these sections: "
+                    "## Overall Assessment, ## Key Findings, ## Recommended Fixes, ## Testing Gaps, ## Release Recommendation. "
+                    "Under each section, use 2 to 5 short bullet points. Keep each bullet under 25 words."
                 ),
             },
             {
                 "role": "user",
-                "content": "Review this code quality assessment context:\n\n" + json.dumps(safe_payload, indent=2),
+                "content": (
+                    "Review this code quality assessment context and format the answer topic-wise using the required Markdown sections. "
+                    "Do not combine everything into one paragraph.\n\n"
+                    + json.dumps(safe_payload, indent=2)
+                ),
             },
         ], config_label="Quality LLM"))
     except Exception as exc:
