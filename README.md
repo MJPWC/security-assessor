@@ -9,6 +9,7 @@ This is a Python MVP web app for assessing deployable application packages befor
 - Packaged certificate, keystore, and private key review.
 - npm, Python, Maven, manifest, and nested JAR dependency inventory.
 - `npm audit` for every package folder that has both `package.json` and `package-lock.json`, including nested frontend apps such as `client/`.
+- `pip-audit` for Python dependency manifests such as `requirements.txt` and `pyproject.toml` when the `pip-audit` command is installed.
 - CycloneDX-lite SBOM generation.
 - LLM security review using Security Assessor's local LLM configuration.
 - Optional LLM quality review using the same Security Assessor LLM configuration.
@@ -60,6 +61,12 @@ Optional setup command:
 
 The current version uses only the Python standard library, so there are no required packages to install.
 
+Python vulnerability scanning is optional and requires `pip-audit` on the host:
+
+```bash
+python3 -m pip install pip-audit
+```
+
 ## Output
 
 Each run creates files under:
@@ -87,3 +94,10 @@ For MuleGenie, that means:
 ## Current Scope
 
 This first version is a pre-deployment assessor. It is not a replacement for enterprise SAST, DAST, VM-based runtime testing, malware sandboxing, license compliance, or cloud controls. It gives a repeatable local/security-team workflow that can be extended with those scanners.
+
+## Known Limitations
+
+- Secret scanning and quality checks are currently regex/line-based, not AST-based or data-flow aware.
+- Semantically obfuscated secrets, such as string-concatenated keys or values built across multiple files, may be missed.
+- Context-dependent code smells can be under-reported or over-reported because the MVP does not fully parse language semantics.
+- Findings should be treated as pre-deployment review signals, not as proof of AST-level SAST accuracy.

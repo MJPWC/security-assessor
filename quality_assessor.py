@@ -21,6 +21,9 @@ QUALITY_EXTENSIONS = {
 }
 SKIP_DIRS = {"node_modules", "dist", "build", "target", ".git", ".venv", "venv", "__pycache__"}
 SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+SEVERITY_SORT = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+QUALITY_SCORE_WEIGHTS = {"critical": 30, "high": 15, "medium": 3, "low": 0.25, "info": 0}
+QUALITY_SCORE_CAPS = {"critical": 90, "high": 60, "medium": 30, "low": 10, "info": 0}
 SENSITIVE_TEXT_RE = re.compile(
     r"(sk-[A-Za-z0-9_-]{12,}|AKIA[0-9A-Z]{16}|Bearer\s+[A-Za-z0-9._~+/=-]{12,}|"
     r"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*['\"]?[^'\"\s,}]{6,})"
@@ -108,6 +111,7 @@ def add_finding(findings, severity, category, title, details, file="", line=""):
         "details": details,
         "file": file,
         "line": line,
+        "count": 1,
     })
 
 
@@ -164,22 +168,98 @@ def scan_text_quality(files, root_dir):
     return findings, {"textFiles": len(text_files), "sourceFiles": len(source_files), "testFiles": len(test_files)}
 
 
-def quality_score(findings):
-    penalty = 0
+def sorted_findings(findings):
+    return sorted(
+        findings,
+        key=lambda item: (
+            SEVERITY_SORT.get(item.get("severity", "info"), 9),
+            item.get("category", ""),
+            item.get("title", ""),
+            item.get("file", ""),
+            int(item.get("line") or 0),
+        ),
+    )
+
+
+def summarize_quality_findings(findings):
+    grouped_keys = {
+        ("low", "Code hygiene", "Debug output"): "Remove temporary debug logging or replace it with controlled application logging.",
+        ("low", "Readability", "Long lines"): "Wrap long lines so the code is easier to review and maintain.",
+        ("low", "Maintainability", "Open code marker"): "Resolve TODO/FIXME/HACK markers or track them in backlog items.",
+    }
+    grouped = {}
+    summarized = []
     for item in findings:
-        penalty += {"critical": 30, "high": 18, "medium": 8, "low": 2, "info": 0}.get(item["severity"], 0)
-    return max(0, 100 - penalty)
+        key = (item.get("severity"), item.get("category"), item.get("title"))
+        if key not in grouped_keys:
+            summarized.append(dict(item))
+            continue
+        bucket = grouped.setdefault(key, {**item, "count": 0, "files": set(), "examples": [], "occurrences": []})
+        bucket["count"] += 1
+        if item.get("file"):
+            bucket["files"].add(item["file"])
+        bucket["occurrences"].append({
+            "file": item.get("file", ""),
+            "line": item.get("line", ""),
+            "details": item.get("details", ""),
+        })
+        if item.get("file") and len(bucket["examples"]) < 3:
+            example = item["file"]
+            if item.get("line"):
+                example = f"{example}:{item['line']}"
+            bucket["examples"].append(example)
+
+    for key, item in grouped.items():
+        files = sorted(item.pop("files"))
+        examples = item.pop("examples")
+        file_count = len(files)
+        example_text = ", ".join(examples)
+        more_text = f" +{file_count - len(examples)} more files" if file_count > len(examples) else ""
+        item["file"] = example_text + more_text if example_text else ""
+        item["line"] = ""
+        item["details"] = f"{item['count']} occurrence(s) across {file_count or 1} file(s). {grouped_keys[key]}"
+        summarized.append(item)
+
+    return sorted_findings(summarized)
 
 
-def decision_for(score, findings):
-    if any(item["severity"] == "critical" for item in findings) or score < 60:
+def quality_score_details(findings):
+    counts = {}
+    for item in findings:
+        severity = item.get("severity", "info")
+        counts[severity] = counts.get(severity, 0) + 1
+    penalties = {}
+    for severity, count in counts.items():
+        weighted_penalty = count * QUALITY_SCORE_WEIGHTS.get(severity, 0)
+        penalties[severity] = min(weighted_penalty, QUALITY_SCORE_CAPS.get(severity, 0))
+    total_penalty = sum(penalties.values())
+    return {
+        "score": max(0, round(100 - total_penalty)),
+        "penalty": round(total_penalty, 2),
+        "penalties": penalties,
+    }
+
+
+def quality_score(findings):
+    return quality_score_details(findings)["score"]
+
+
+def decision_for(score):
+    if score < 60:
         return "Quality gate failed"
-    if score < 80 or any(item["severity"] in {"high", "medium"} for item in findings):
+    if score < 80:
         return "Review recommended"
     return "Quality gate passed"
 
 
 def build_markdown_report(result):
+    score_details = result.get("scoreDetails") or {}
+    penalties = score_details.get("penalties") or {}
+    text_files = result["metrics"].get("textFiles", 0) or 0
+    source_files = result["metrics"].get("sourceFiles", 0) or 0
+    finding_total = result.get("findingTotal", len(result.get("findings") or []))
+    findings_per_text_file = round(finding_total / text_files, 2) if text_files else 0
+    findings_per_source_file = round(finding_total / source_files, 2) if source_files else 0
     lines = [
         "# Code Quality Assessment Report",
         "",
@@ -195,6 +275,22 @@ def build_markdown_report(result):
         f"- Text files scanned: {result['metrics']['textFiles']}",
         f"- Source files scanned: {result['metrics']['sourceFiles']}",
         f"- Test files detected: {result['metrics']['testFiles']}",
+        f"- Raw findings: {finding_total}",
+        f"- Displayed finding rows: {result.get('displayFindingTotal', len(result.get('findings') or []))}",
+        f"- Findings per text file: {findings_per_text_file}",
+        f"- Findings per source file: {findings_per_source_file}",
+        "",
+        "## Score Breakdown",
+        "",
+        "Decision is based on the final score band: below 60 fails, 60-79 requires review, and 80 or higher passes.",
+        "",
+        "| Severity | Raw Count | Penalty Applied |",
+        "| --- | ---: | ---: |",
+    ]
+    for severity in ["critical", "high", "medium", "low", "info"]:
+        lines.append(f"| {severity} | {result['findingCounts'].get(severity, 0)} | {penalties.get(severity, 0)} |")
+    lines.extend([
+        f"| total | {finding_total} | {score_details.get('penalty', 0)} |",
         "",
         "## LLM Quality Review",
         "",
@@ -202,13 +298,34 @@ def build_markdown_report(result):
         "",
         "## Findings",
         "",
+        "| Severity | Count | Category | Title | File | Line | Recommended Action |",
+        "| --- | ---: | --- | --- | --- | ---: | --- |",
+    ])
+    if not result["findings"]:
+        lines.append("| info | 0 | Quality | No findings |  |  | No quality findings were detected by the static checks. |")
+    for item in result["findings"]:
+        lines.append(f"| {item['severity']} | {item.get('count', 1)} | {item['category']} | {item['title']} | {item.get('file', '')} | {item.get('line', '')} | {item['details']} |")
+    lines.extend([
+        "",
+        "## Finding Occurrences",
+        "",
+        "Grouped rows above are expanded here so each affected file and line can be located.",
+        "",
         "| Severity | Category | Title | File | Line | Details |",
         "| --- | --- | --- | --- | ---: | --- |",
-    ]
-    if not result["findings"]:
-        lines.append("| info | Quality | No findings |  |  | No quality findings were detected by the static checks. |")
+    ])
+    occurrence_count = 0
     for item in result["findings"]:
-        lines.append(f"| {item['severity']} | {item['category']} | {item['title']} | {item.get('file', '')} | {item.get('line', '')} | {item['details']} |")
+        occurrences = item.get("occurrences") or []
+        if not occurrences:
+            lines.append(f"| {item['severity']} | {item['category']} | {item['title']} | {item.get('file', '')} | {item.get('line', '')} | {item['details']} |")
+            occurrence_count += 1
+            continue
+        for occurrence in occurrences:
+            lines.append(f"| {item['severity']} | {item['category']} | {item['title']} | {occurrence.get('file', '')} | {occurrence.get('line', '')} | {occurrence.get('details', '')} |")
+            occurrence_count += 1
+    if occurrence_count == 0:
+        lines.append("| info | Quality | No findings |  |  | No quality findings were detected by the static checks. |")
     return "\n".join(lines)
 
 
@@ -261,10 +378,11 @@ def style_header(values):
 
 
 def quality_finding_rows(findings):
-    rows = [style_header(["Severity", "Category", "Title", "File", "Line", "Details"])]
+    rows = [style_header(["Severity", "Count", "Category", "Title", "File", "Line", "Recommended Action"])]
     for item in findings:
         rows.append([
             item.get("severity", ""),
+            item.get("count", 1),
             item.get("category", ""),
             item.get("title", ""),
             item.get("file", ""),
@@ -272,11 +390,42 @@ def quality_finding_rows(findings):
             item.get("details", ""),
         ])
     if len(rows) == 1:
+        rows.append(["info", 0, "Quality", "No findings", "", "", "No quality findings were detected."])
+    return rows
+
+
+def quality_occurrence_rows(findings):
+    rows = [style_header(["Severity", "Category", "Title", "File", "Line", "Details"])]
+    for item in findings:
+        occurrences = item.get("occurrences") or []
+        if not occurrences:
+            rows.append([
+                item.get("severity", ""),
+                item.get("category", ""),
+                item.get("title", ""),
+                item.get("file", ""),
+                item.get("line", ""),
+                item.get("details", ""),
+            ])
+            continue
+        for occurrence in occurrences:
+            rows.append([
+                item.get("severity", ""),
+                item.get("category", ""),
+                item.get("title", ""),
+                occurrence.get("file", ""),
+                occurrence.get("line", ""),
+                occurrence.get("details", ""),
+            ])
+    if len(rows) == 1:
         rows.append(["info", "Quality", "No findings", "", "", "No quality findings were detected."])
     return rows
 
 
 def build_xlsx_report(result):
+    score_details = result.get("scoreDetails") or {}
+    penalties = score_details.get("penalties") or {}
+    density = result.get("findingDensity") or {}
     summary_rows = [
         [{"value": "Code Quality Assessment Report", "style": 2}],
         [],
@@ -292,11 +441,17 @@ def build_xlsx_report(result):
         ["Text files scanned", result["metrics"]["textFiles"]],
         ["Source files scanned", result["metrics"]["sourceFiles"]],
         ["Test files detected", result["metrics"]["testFiles"]],
+        ["Raw findings", result.get("findingTotal", len(result.get("findings") or []))],
+        ["Displayed finding rows", result.get("displayFindingTotal", len(result.get("findings") or []))],
+        ["Findings per text file", density.get("perTextFile", 0)],
+        ["Findings per source file", density.get("perSourceFile", 0)],
+        ["Score penalty", score_details.get("penalty", 0)],
+        ["Decision rule", "Score bands: <60 failed, 60-79 review, >=80 passed"],
         [],
-        style_header(["Severity", "Count"]),
+        style_header(["Severity", "Count", "Penalty Applied"]),
     ]
     for severity in ["critical", "high", "medium", "low", "info"]:
-        summary_rows.append([severity, result["findingCounts"].get(severity, 0)])
+        summary_rows.append([severity, result["findingCounts"].get(severity, 0), penalties.get(severity, 0)])
     llm_rows = [
         [{"value": "LLM Quality Review", "style": 2}],
         [],
@@ -304,7 +459,8 @@ def build_xlsx_report(result):
     ]
     sheets = [
         ("Summary", summary_rows, [28, 90]),
-        ("Findings", quality_finding_rows(result["findings"]), [14, 22, 34, 48, 10, 80]),
+        ("Findings", quality_finding_rows(result["findings"]), [14, 10, 22, 34, 48, 10, 80]),
+        ("Occurrences", quality_occurrence_rows(result["findings"]), [14, 22, 34, 60, 10, 80]),
         ("LLM Review", llm_rows, [22, 120]),
     ]
     content_types = [
@@ -432,11 +588,19 @@ def assess_quality(file_name, content_base64, runs_dir, llm_reviewer=None):
     }
     archive = extract_artifact(artifact_path, extract_dir, artifact["type"])
     files = walk_files(extract_dir)
-    findings, metrics = scan_text_quality(files, extract_dir)
+    raw_findings, metrics = scan_text_quality(files, extract_dir)
     counts = {}
-    for item in findings:
+    for item in raw_findings:
         counts[item["severity"]] = counts.get(item["severity"], 0) + 1
-    score = quality_score(findings)
+    score_details = quality_score_details(raw_findings)
+    score = score_details["score"]
+    findings = summarize_quality_findings(raw_findings)
+    text_file_count = metrics.get("textFiles", 0) or 0
+    source_file_count = metrics.get("sourceFiles", 0) or 0
+    finding_density = {
+        "perTextFile": round(len(raw_findings) / text_file_count, 2) if text_file_count else 0,
+        "perSourceFile": round(len(raw_findings) / source_file_count, 2) if source_file_count else 0,
+    }
     result = {
         "runId": run_id,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
@@ -444,8 +608,12 @@ def assess_quality(file_name, content_base64, runs_dir, llm_reviewer=None):
         "archive": archive,
         "metrics": metrics,
         "score": score,
-        "decision": decision_for(score, findings),
+        "scoreDetails": score_details,
+        "decision": decision_for(score),
         "findingCounts": counts,
+        "findingTotal": len(raw_findings),
+        "displayFindingTotal": len(findings),
+        "findingDensity": finding_density,
         "findings": findings,
         "llmReview": "",
     }

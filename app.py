@@ -422,6 +422,147 @@ def run_npm_audit_if_possible(extract_dir, findings):
         "vulnerabilityCount": total_vulnerabilities,
     }
 
+
+def find_pip_audit_targets(extract_dir):
+    targets = []
+    for current, dirs, names in os.walk(extract_dir):
+        dirs[:] = [
+            name for name in dirs
+            if name not in {"node_modules", ".git", "dist", "build", "coverage", ".venv", "venv", "__pycache__"}
+        ]
+        current_path = Path(current)
+        if "requirements.txt" in names:
+            targets.append({"project": current_path, "file": current_path / "requirements.txt", "kind": "requirements"})
+        if "pyproject.toml" in names:
+            targets.append({"project": current_path, "file": current_path / "pyproject.toml", "kind": "pyproject"})
+    return targets
+
+
+def pip_audit_severity(vulnerability):
+    aliases = {
+        "critical": "critical",
+        "high": "high",
+        "moderate": "medium",
+        "medium": "medium",
+        "low": "low",
+    }
+    candidates = []
+
+    def collect(value):
+        if isinstance(value, str):
+            candidates.append(value)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                if str(key).lower() in {"severity", "cvssv3_severity"}:
+                    collect(item)
+                elif str(key).lower() in {"database_specific", "severity"}:
+                    collect(item)
+
+    collect(vulnerability)
+    for candidate in candidates:
+        normalized = candidate.strip().lower()
+        if normalized in aliases:
+            return aliases[normalized]
+    return "medium"
+
+
+def run_pip_audit_if_possible(extract_dir, findings):
+    targets = find_pip_audit_targets(extract_dir)
+    if not targets:
+        return {"attempted": False, "targets": [], "reason": "No requirements.txt or pyproject.toml files found"}
+    if not shutil.which("pip-audit"):
+        return {"attempted": False, "targets": [], "reason": "pip-audit command is not installed"}
+
+    results = []
+    total_vulnerabilities = 0
+    attempted = False
+
+    for target in targets:
+        attempted = True
+        rel_target = "." if target["project"] == extract_dir else str(target["project"].relative_to(extract_dir))
+        rel_file = str(target["file"].relative_to(extract_dir))
+        target_vulnerabilities = 0
+        target_ok = False
+        error_message = None
+        try:
+            command = [
+                "pip-audit",
+                "--format",
+                "json",
+                "--progress-spinner",
+                "off",
+                "--timeout",
+                "60",
+            ]
+            service = (os.getenv("PIP_AUDIT_SERVICE") or "").strip()
+            if service:
+                command.extend(["--vulnerability-service", service])
+            if target["kind"] == "requirements":
+                command.extend(["--requirement", str(target["file"])])
+            else:
+                command.append(str(target["project"]))
+            result = subprocess.run(
+                command,
+                cwd=target["project"],
+                text=True,
+                capture_output=True,
+                timeout=90,
+            )
+            data = json.loads(result.stdout or "{}")
+            dependencies = data.get("dependencies") or []
+            for dependency in dependencies:
+                package_name = dependency.get("name") or "unknown"
+                installed_version = dependency.get("version") or "unknown"
+                vulnerabilities = dependency.get("vulns") or dependency.get("vulnerabilities") or []
+                target_vulnerabilities += len(vulnerabilities)
+                for vulnerability in vulnerabilities:
+                    aliases = vulnerability.get("aliases") or []
+                    vuln_id = vulnerability.get("id") or (aliases[0] if aliases else "unknown")
+                    severity = pip_audit_severity(vulnerability)
+                    fix_versions = vulnerability.get("fix_versions") or vulnerability.get("fixed_versions") or []
+                    add_finding(findings, severity, "Known vulnerability scan", f"pip-audit reported a vulnerability for {package_name}.", {
+                        "package": package_name,
+                        "version": installed_version,
+                        "vulnerability": vuln_id,
+                        "project": rel_target,
+                        "sourceFile": rel_file,
+                        "fixVersions": fix_versions,
+                    })
+            total_vulnerabilities += target_vulnerabilities
+            target_ok = result.returncode in {0, 1}
+            if not target_ok and not dependencies:
+                error_message = (result.stderr or result.stdout or "pip-audit failed").strip()[:1000]
+                add_finding(findings, "medium", "Known vulnerability scan", "pip-audit did not return parseable dependency output.", {
+                    "project": rel_target,
+                    "sourceFile": rel_file,
+                    "error": error_message,
+                })
+        except Exception as exc:
+            error_message = str(exc)
+            add_finding(findings, "medium", "Known vulnerability scan", "pip-audit did not return parseable output.", {
+                "project": rel_target,
+                "sourceFile": rel_file,
+                "error": error_message,
+            })
+
+        results.append({
+            "project": rel_target,
+            "sourceFile": rel_file,
+            "kind": target["kind"],
+            "ok": target_ok,
+            "vulnerabilityCount": target_vulnerabilities,
+            "error": error_message,
+        })
+
+    return {
+        "attempted": attempted,
+        "targets": results,
+        "vulnerabilityCount": total_vulnerabilities,
+    }
+
 def decision_for(findings):
     worst = max([SEVERITY_RANK.get(item["severity"], 0) for item in findings] or [0])
     if worst >= SEVERITY_RANK["critical"]:
@@ -470,6 +611,8 @@ def run_llm_review(assessment):
         "findings": assessment["findings"],
         "dependencySample": assessment["components"][:60],
         "certificateScan": assessment.get("certificateScan"),
+        "npmAudit": assessment.get("npmAudit"),
+        "pipAudit": assessment.get("pipAudit"),
     })
     try:
         return redact_text(call_llm([
@@ -488,18 +631,22 @@ def run_quality_llm_review(payload):
                 "role": "system",
                 "content": (
                     "You are a senior code quality reviewer. Review the provided static quality findings and bounded redacted code samples. "
-                    "Focus on maintainability, reliability, readability, testability, and practical refactoring recommendations. "
+                    "Act as a decision-support reviewer, not another findings table. "
+                    "Focus on what the result means, what to prioritize, release impact, and where human review is needed. "
+                    "Do not repeat every finding or restate severity counts unless it changes the release decision. "
+                    "Do not provide exact patches, line-by-line code changes, or claim the precise fix is known. "
+                    "Suggest the type of remediation the user should consider, based on the evidence. "
                     "Do not request secrets or full source code. Return only structured Markdown, not a single paragraph. "
                     "Use exactly these sections: "
-                    "## Overall Assessment, ## Key Findings, ## Recommended Fixes, ## Testing Gaps, ## Release Recommendation. "
+                    "## Executive Summary, ## Top Priorities, ## Release Impact, ## Recommended Actions, ## Human Review Needed. "
                     "Under each section, use 2 to 5 short bullet points. Keep each bullet under 25 words."
                 ),
             },
             {
                 "role": "user",
                 "content": (
-                    "Review this code quality assessment context and format the answer topic-wise using the required Markdown sections. "
-                    "Do not combine everything into one paragraph.\n\n"
+                    "Review this code quality assessment context and provide decision guidance using the required Markdown sections. "
+                    "Do not combine everything into one paragraph. Do not duplicate the findings table.\n\n"
                     + json.dumps(safe_payload, indent=2)
                 ),
             },
@@ -1060,7 +1207,8 @@ def build_markdown_report(assessment):
         "| Secret scanning | Checks text files for hardcoded keys, tokens, private keys, credentialed URLs, and sensitive assignments. | Completed |",
         "| Certificate and TLS security | Checks packaged certificates, private keys, and keystores. | Completed |",
         "| Dependency inventory | Extracts npm, Python, Maven, manifest, and nested JAR component evidence where present. | Completed |",
-        f"| Known vulnerability scan | Runs npm audit for every package.json + package-lock.json pair found, including nested client apps. | {'Completed' if assessment['npmAudit']['attempted'] else 'Not applicable'} |",
+        f"| npm vulnerability scan | Runs npm audit for every package.json + package-lock.json pair found, including nested client apps. | {'Completed' if assessment['npmAudit']['attempted'] else 'Not applicable'} |",
+        f"| Python vulnerability scan | Runs pip-audit for requirements.txt and pyproject.toml targets. | {'Completed' if assessment['pipAudit']['attempted'] else 'Not applicable'} |",
         "| SBOM generation | Generates a CycloneDX-lite JSON dependency inventory. | Completed |",
         "| LLM security review | Sends only redacted findings metadata to the configured backend LLM. | Completed |",
         "",
@@ -1094,6 +1242,21 @@ def build_markdown_report(assessment):
             lines.append(f"| {target.get('project', '.')} | {status} | {target.get('vulnerabilityCount', 0)} |")
     else:
         lines.append(f"| Not applicable | {assessment['npmAudit'].get('reason', 'No npm audit targets found')} | 0 |")
+
+    lines.extend([
+        "",
+        "## Python Audit Targets",
+        "",
+        "| Project | Source | Status | Vulnerabilities |",
+        "| --- | --- | --- | ---: |",
+    ])
+    pip_audit_targets = assessment["pipAudit"].get("targets") or []
+    if pip_audit_targets:
+        for target in pip_audit_targets:
+            status = "Completed" if target.get("ok") else "Failed"
+            lines.append(f"| {target.get('project', '.')} | {target.get('sourceFile', '')} | {status} | {target.get('vulnerabilityCount', 0)} |")
+    else:
+        lines.append(f"| Not applicable |  | {assessment['pipAudit'].get('reason', 'No Python audit targets found')} | 0 |")
 
     certificate_scan = assessment.get("certificateScan") or {}
     lines.extend([
@@ -1242,6 +1405,24 @@ def npm_audit_rows(npm_audit):
     return rows
 
 
+def pip_audit_rows(pip_audit):
+    rows = [style_header(["Project", "Source File", "Kind", "Status", "Vulnerabilities", "Error"])]
+    targets = pip_audit.get("targets") or []
+    if not targets:
+        rows.append(["Not applicable", "", "", pip_audit.get("reason", "No Python audit targets found"), 0, ""])
+        return rows
+    for target in targets:
+        rows.append([
+            target.get("project", "."),
+            target.get("sourceFile", ""),
+            target.get("kind", ""),
+            "Completed" if target.get("ok") else "Failed",
+            target.get("vulnerabilityCount", 0),
+            target.get("error") or "",
+        ])
+    return rows
+
+
 def build_xlsx_report(assessment):
     summary_rows = [
         [{"value": "Package Security Assessment Report", "style": 2}],
@@ -1267,6 +1448,7 @@ def build_xlsx_report(assessment):
         ["Certificate and TLS security", "Completed"],
         ["Dependency inventory", "Completed"],
         ["npm audit", "Completed" if assessment["npmAudit"].get("attempted") else "Not applicable"],
+        ["pip-audit", "Completed" if assessment["pipAudit"].get("attempted") else "Not applicable"],
         ["SBOM generation", "Completed"],
     ])
     sheets = [
@@ -1275,6 +1457,7 @@ def build_xlsx_report(assessment):
         ("Certificates", certificate_rows(assessment.get("certificateScan") or {}), [16, 42, 18, 12, 50, 50, 24, 60]),
         ("Components", component_rows(assessment["components"]), [24, 42, 22, 48]),
         ("npm Audit", npm_audit_rows(assessment["npmAudit"]), [36, 18, 18, 60]),
+        ("Python Audit", pip_audit_rows(assessment["pipAudit"]), [36, 48, 18, 18, 18, 60]),
     ]
     content_types = [
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
@@ -1375,6 +1558,7 @@ def assess_artifact(file_name, content_base64):
     certificate_scan = scan_certificates(files, extract_dir, findings)
     components = collect_dependency_inventory(files, extract_dir, findings)
     npm_audit = run_npm_audit_if_possible(extract_dir, findings)
+    pip_audit = run_pip_audit_if_possible(extract_dir, findings)
     finding_counts = {}
     for item in findings:
         finding_counts[item["severity"]] = finding_counts.get(item["severity"], 0) + 1
@@ -1386,6 +1570,7 @@ def assess_artifact(file_name, content_base64):
         "secretScan": secret_scan,
         "certificateScan": certificate_scan,
         "npmAudit": npm_audit,
+        "pipAudit": pip_audit,
         "components": components,
         "findings": findings,
         "findingCounts": finding_counts,
@@ -1432,7 +1617,11 @@ class Handler(SimpleHTTPRequestHandler):
                     "runId": result["runId"],
                     "decision": result["decision"],
                     "score": result["score"],
+                    "scoreDetails": result["scoreDetails"],
                     "findingCounts": result["findingCounts"],
+                    "findingTotal": result["findingTotal"],
+                    "displayFindingTotal": result["displayFindingTotal"],
+                    "findingDensity": result["findingDensity"],
                     "findings": result["findings"],
                     "metrics": result["metrics"],
                     "llmReview": result["llmReview"],
@@ -1466,6 +1655,8 @@ class Handler(SimpleHTTPRequestHandler):
                 "components": result["components"][:150],
                 "componentCount": len(result["components"]),
                 "certificateScan": result["certificateScan"],
+                "npmAudit": result["npmAudit"],
+                "pipAudit": result["pipAudit"],
                 "llmReview": result["llmReview"],
                 "reportMarkdown": result["reportMarkdown"],
                 "reportPath": result["reportPath"],

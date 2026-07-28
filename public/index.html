@@ -344,6 +344,81 @@
         padding: 9px 10px;
         vertical-align: top;
       }
+      .mini-button {
+        width: auto;
+        min-width: 64px;
+        height: 30px;
+        min-height: 30px;
+        padding: 5px 9px;
+        border: 1px solid var(--line);
+        background: #fff;
+        color: var(--accent-dark);
+        font-size: 12px;
+        font-weight: 750;
+      }
+      .mini-button:hover:not(:disabled) {
+        background: var(--panel);
+        color: var(--burgundy);
+      }
+      .mini-button:disabled {
+        color: var(--muted);
+        background: var(--panel);
+      }
+      .modal-backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        display: grid;
+        place-items: center;
+        padding: 18px;
+        background: rgba(31, 31, 31, 0.48);
+      }
+      .modal-backdrop[hidden] {
+        display: none;
+      }
+      .modal {
+        width: min(920px, 100%);
+        max-height: min(680px, 86vh);
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        border-radius: 4px;
+        border: 1px solid var(--line);
+        background: #fff;
+        box-shadow: 0 18px 44px rgba(31, 31, 31, 0.28);
+        overflow: hidden;
+      }
+      .modal-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 12px 14px;
+        background: var(--charcoal);
+        color: #fff;
+      }
+      .modal-header h2 {
+        margin: 0;
+        font-size: 14px;
+      }
+      .modal-close {
+        width: 34px;
+        min-width: 34px;
+        height: 34px;
+        min-height: 34px;
+        border: 1px solid #6a625c;
+        background: transparent;
+        color: #fff;
+        padding: 0;
+      }
+      .modal-body {
+        overflow: auto;
+        padding: 14px;
+      }
+      .modal-note {
+        margin: 0 0 12px;
+        color: var(--muted);
+        font-size: 13px;
+      }
       .pill {
         display: inline-flex;
         align-items: center;
@@ -523,6 +598,15 @@ cannot comply</textarea>
         </div>
       </section>
     </main>
+    <div id="quality-location-modal" class="modal-backdrop" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="quality-location-title">
+        <div class="modal-header">
+          <h2 id="quality-location-title">Finding Locations</h2>
+          <button class="modal-close" id="quality-location-close" type="button" aria-label="Close">x</button>
+        </div>
+        <div class="modal-body" id="quality-location-body"></div>
+      </div>
+    </div>
     <script>
       const fileInput = document.getElementById('artifact');
       const securityModeButton = document.getElementById('security-mode-button');
@@ -538,7 +622,12 @@ cannot comply</textarea>
       const qualityLinksEl = document.getElementById('quality-links');
       const guardrailLinksEl = document.getElementById('guardrail-links');
       const decisionEl = document.getElementById('decision');
+      const qualityLocationModal = document.getElementById('quality-location-modal');
+      const qualityLocationBody = document.getElementById('quality-location-body');
+      const qualityLocationTitle = document.getElementById('quality-location-title');
+      const qualityLocationClose = document.getElementById('quality-location-close');
       const guardrailButton = document.getElementById('guardrail-scan');
+      let latestQualityFindings = [];
       const guardrailFields = {
         targetUrl: document.getElementById('target-url'),
         endpoint: document.getElementById('guardrail-endpoint'),
@@ -705,12 +794,46 @@ cannot comply</textarea>
         return `<div class="markdown-body">${html.join('') || '<p>No review text was returned.</p>'}</div>`;
       }
 
+      function findingOccurrences(item) {
+        const occurrences = item?.occurrences || [];
+        if (occurrences.length) return occurrences;
+        if (item?.file || item?.line) {
+          return [{ file: item.file || '', line: item.line || '', details: item.details || '' }];
+        }
+        return [];
+      }
+
+      function closeQualityLocationModal() {
+        qualityLocationModal.hidden = true;
+        qualityLocationBody.innerHTML = '';
+      }
+
+      function openQualityLocationModal(index) {
+        const item = latestQualityFindings[index];
+        if (!item) return;
+        const occurrences = findingOccurrences(item);
+        qualityLocationTitle.textContent = `${item.title || 'Finding'} locations`;
+        const rows = occurrences.map(occurrence => `
+          <tr>
+            <td>${escapeHtml(occurrence.file || '')}</td>
+            <td>${escapeHtml(occurrence.line || '')}</td>
+            <td>${escapeHtml(occurrence.details || item.details || '')}</td>
+          </tr>`);
+        qualityLocationBody.innerHTML = `
+          <p class="modal-note">${escapeHtml(item.category || 'Quality')} · ${escapeHtml(item.severity || '')} · ${escapeHtml(occurrences.length)} location(s)</p>
+          ${renderTable(['File', 'Line', 'Details'], rows, 'No exact locations were recorded for this finding.')}
+        `;
+        qualityLocationModal.hidden = false;
+      }
+
       function renderReport(payload) {
         const counts = payload.findingCounts || {};
         const findings = payload.findings || [];
         const certificateScan = payload.certificateScan || {};
         const certificateFiles = certificateScan.certificateFiles || [];
         const components = payload.components || [];
+        const npmAudit = payload.npmAudit || {};
+        const pipAudit = payload.pipAudit || {};
         const findingRows = findings.map(item => `
           <tr>
             <td>${pill(item.severity, item.severity)}</td>
@@ -731,6 +854,22 @@ cannot comply</textarea>
             <td>${escapeHtml(item.subject || item.error || '')}</td>
             <td>${escapeHtml(item.notAfter || '')}</td>
           </tr>`);
+        const auditRows = [
+          `
+          <tr>
+            <td>npm audit</td>
+            <td>${pill(npmAudit.attempted ? 'Completed' : 'Not applicable', npmAudit.attempted ? 'pass' : 'info')}</td>
+            <td>${escapeHtml(npmAudit.vulnerabilityCount || 0)}</td>
+            <td>${escapeHtml(npmAudit.reason || '')}</td>
+          </tr>`,
+          `
+          <tr>
+            <td>pip-audit</td>
+            <td>${pill(pipAudit.attempted ? 'Completed' : 'Not applicable', pipAudit.attempted ? 'pass' : 'info')}</td>
+            <td>${escapeHtml(pipAudit.vulnerabilityCount || 0)}</td>
+            <td>${escapeHtml(pipAudit.reason || '')}</td>
+          </tr>`
+        ];
         reportEl.innerHTML = `
           <section class="report-card">
             <h2>Assessment Summary</h2>
@@ -755,6 +894,10 @@ cannot comply</textarea>
           <section class="report-card">
             <h2>Dependency Sample</h2>
             ${renderTable(['Ecosystem', 'Name', 'Version'], componentRows, 'No dependency components were found.')}
+          </section>
+          <section class="report-card">
+            <h2>Dependency Vulnerability Scans</h2>
+            ${renderTable(['Scanner', 'Status', 'Vulnerabilities', 'Reason'], auditRows, 'No dependency vulnerability scanners were run.')}
           </section>
         `;
       }
@@ -801,15 +944,22 @@ cannot comply</textarea>
         const counts = payload.findingCounts || {};
         const metrics = payload.metrics || {};
         const llmStatus = payload.llmStatus || {};
-        const rows = (payload.findings || []).map(item => `
+        const scoreDetails = payload.scoreDetails || {};
+        const penalties = scoreDetails.penalties || {};
+        const density = payload.findingDensity || {};
+        latestQualityFindings = payload.findings || [];
+        const rows = latestQualityFindings.map((item, index) => {
+          const locationCount = findingOccurrences(item).length;
+          return `
           <tr>
             <td>${pill(item.severity, item.severity)}</td>
+            <td>${escapeHtml(item.count || 1)}</td>
             <td>${escapeHtml(item.category)}</td>
             <td>${escapeHtml(item.title)}</td>
-            <td>${escapeHtml(item.file || '')}</td>
-            <td>${escapeHtml(item.line || '')}</td>
+            <td><button class="mini-button" type="button" data-quality-location-index="${index}" ${locationCount ? '' : 'disabled'}>View</button></td>
             <td>${escapeHtml(item.details || '')}</td>
-          </tr>`);
+          </tr>`;
+        });
         reportEl.innerHTML = `
           <section class="report-card">
             <h2>Quality Assessment Summary</h2>
@@ -822,7 +972,10 @@ cannot comply</textarea>
                 <dt>Source files</dt><dd>${escapeHtml(metrics.sourceFiles || 0)}</dd>
                 <dt>Test files</dt><dd>${escapeHtml(metrics.testFiles || 0)}</dd>
                 <dt>LLM provider</dt><dd>${escapeHtml(llmStatus.configured ? (llmStatus.providers || []).join(', ') : 'Not configured')}</dd>
-                <dt>Findings</dt><dd>High ${counts.high || 0} · Medium ${counts.medium || 0} · Low ${counts.low || 0}</dd>
+                <dt>Findings</dt><dd>Critical ${counts.critical || 0} · High ${counts.high || 0} · Medium ${counts.medium || 0} · Low ${counts.low || 0}</dd>
+                <dt>Score penalty</dt><dd>${escapeHtml(scoreDetails.penalty || 0)} points: Critical ${penalties.critical || 0}, High ${penalties.high || 0}, Medium ${penalties.medium || 0}, Low ${penalties.low || 0}</dd>
+                <dt>Displayed rows</dt><dd>${escapeHtml(payload.displayFindingTotal || (payload.findings || []).length)} summarized from ${escapeHtml(payload.findingTotal || (payload.findings || []).length)} finding(s)</dd>
+                <dt>Finding density</dt><dd>${escapeHtml(density.perTextFile || 0)} per text file · ${escapeHtml(density.perSourceFile || 0)} per source file</dd>
               </dl>
             </div>
           </section>
@@ -831,14 +984,26 @@ cannot comply</textarea>
             <div class="card-body">${renderMarkdown(payload.llmReview || 'LLM review was not requested or no provider was configured.')}</div>
           </section>
           <section class="report-card">
-            <h2>Quality Findings</h2>
-            ${renderTable(['Severity', 'Category', 'Title', 'File', 'Line', 'Details'], rows, 'No quality findings were reported.')}
+            <h2>Quality Findings by Severity</h2>
+            ${renderTable(['Severity', 'Count', 'Category', 'Title', 'Locations', 'Action'], rows, 'No quality findings were reported.')}
           </section>
         `;
       }
 
       securityModeButton.addEventListener('click', () => setMode('security'));
       qualityModeButton.addEventListener('click', () => setMode('quality'));
+      reportEl.addEventListener('click', event => {
+        const button = event.target.closest('[data-quality-location-index]');
+        if (!button) return;
+        openQualityLocationModal(Number(button.dataset.qualityLocationIndex));
+      });
+      qualityLocationClose.addEventListener('click', closeQualityLocationModal);
+      qualityLocationModal.addEventListener('click', event => {
+        if (event.target === qualityLocationModal) closeQualityLocationModal();
+      });
+      document.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && !qualityLocationModal.hidden) closeQualityLocationModal();
+      });
 
       scanButton.addEventListener('click', async () => {
         const file = fileInput.files && fileInput.files[0];
