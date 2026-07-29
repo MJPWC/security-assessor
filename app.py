@@ -894,6 +894,104 @@ def run_quality_llm_review(payload):
         return "LLM quality review unavailable: " + redact_text(str(exc))
 
 
+def combined_deployment_verdict(security_payload, quality_payload):
+    security_decision = str(security_payload.get("decision") or "").lower()
+    quality_decision = str(quality_payload.get("decision") or "").lower()
+    if not security_decision or not quality_decision:
+        raise ValueError("Both security and quality decisions are required.")
+    if "blocked" in security_decision:
+        if "pending security review" in security_decision:
+            status = "Do not deploy without security approval"
+            reason = "Security assessment is blocked pending security review."
+            required_action = "Get security owner approval or remediate the security findings, then rerun the assessment."
+        else:
+            status = "Do not deploy"
+            reason = "Security assessment found blocking risk."
+            required_action = "Fix the blocking security findings and rerun security and quality assessment."
+    elif "failed" in quality_decision:
+        status = "Do not deploy"
+        reason = "Quality assessment failed the quality gate."
+        required_action = "Fix quality gate failures and rerun the quality assessment."
+    elif "conditional" in security_decision and "passed" in quality_decision:
+        status = "Deploy with security exception approval"
+        reason = "Quality passed, but security requires conditional approval."
+        required_action = "Record the security exception/approval before deployment."
+    elif "conditional" in security_decision:
+        status = "Deploy only after security and quality review approval"
+        reason = "Security is conditional and quality still requires review."
+        required_action = "Resolve or formally accept security and quality review items."
+    elif "review recommended" in quality_decision:
+        status = "Deploy only after quality review approval"
+        reason = "Security is acceptable, but quality review is recommended."
+        required_action = "Complete quality review approval or remediate the review findings."
+    elif "passed" in quality_decision and "approved" in security_decision:
+        status = "Deployable"
+        reason = "Security and quality checks are in acceptable states."
+        required_action = "Proceed with normal environment-specific release validation."
+    else:
+        status = "Review required before deployment"
+        reason = "The combined assessment state is not clearly deployable."
+        required_action = "Review security and quality reports before deployment."
+    css_class = "pass" if status == "Deployable" else "medium" if "approval" in status.lower() or "review" in status.lower() else "fail"
+    return {
+        "status": status,
+        "className": css_class,
+        "reason": reason,
+        "requiredAction": required_action,
+        "securityDecision": security_payload.get("decision"),
+        "qualityDecision": quality_payload.get("decision"),
+    }
+
+
+def run_deployment_llm_advisory(verdict, security_payload, quality_payload):
+    safe_payload = redact_value({
+        "finalVerdict": verdict,
+        "security": {
+            "decision": security_payload.get("decision"),
+            "findingCounts": security_payload.get("findingCounts"),
+            "reportCard": security_payload.get("reportCard"),
+            "topFindings": (security_payload.get("findings") or [])[:20],
+        },
+        "quality": {
+            "decision": quality_payload.get("decision"),
+            "score": quality_payload.get("score"),
+            "findingCounts": quality_payload.get("findingCounts"),
+            "reportCard": quality_payload.get("reportCard"),
+            "topFindings": (quality_payload.get("findings") or [])[:20],
+        },
+    })
+    try:
+        return redact_text(call_llm([
+            {
+                "role": "system",
+                "content": (
+                    "You are a release readiness advisor. The deterministic final deployment verdict is already decided by policy. "
+                    "Do not override or weaken it. Explain the verdict in concise Markdown with exactly these sections: "
+                    "## Deployment Advisory, ## Top Reasons, ## Required Actions. Use short bullets."
+                ),
+            },
+            {
+                "role": "user",
+                "content": "Explain this final deployment verdict using the security and quality summaries:\n\n" + json.dumps(safe_payload, indent=2),
+            },
+        ], config_label="Deployment verdict LLM"))
+    except Exception as exc:
+        return "LLM deployment advisory unavailable: " + redact_text(str(exc))
+
+
+def build_deployment_verdict(payload):
+    security_payload = payload.get("security") or {}
+    quality_payload = payload.get("quality") or {}
+    if not security_payload.get("findingCounts"):
+        raise ValueError("Run package Security Assessment before requesting final deployment verdict.")
+    if "score" not in quality_payload:
+        raise ValueError("Run Quality Assessment before requesting final deployment verdict.")
+    verdict = combined_deployment_verdict(security_payload, quality_payload)
+    verdict["advisory"] = run_deployment_llm_advisory(verdict, security_payload, quality_payload)
+    verdict["generatedAt"] = datetime.now(timezone.utc).isoformat()
+    return verdict
+
+
 
 def load_prompt_file(path, default_severity="info"):
     if not path.exists():
@@ -1918,12 +2016,15 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
-        if self.path not in {"/api/assess", "/api/guardrail-test", "/api/quality-assess"}:
+        if self.path not in {"/api/assess", "/api/guardrail-test", "/api/quality-assess", "/api/deployment-verdict"}:
             self.send_json(HTTPStatus.NOT_FOUND, {"error": "Route not found."})
             return
         try:
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            if self.path == "/api/deployment-verdict":
+                self.send_json(HTTPStatus.OK, build_deployment_verdict(payload))
+                return
             if self.path == "/api/quality-assess":
                 llm_reviewer = run_quality_llm_review if payload.get("useLlmReview") else None
                 result = assess_quality(payload.get("fileName"), payload.get("contentBase64"), RUNS_DIR, llm_reviewer=llm_reviewer)
@@ -1985,7 +2086,12 @@ class Handler(SimpleHTTPRequestHandler):
             })
         except Exception as exc:
             traceback.print_exc()
-            label = "Quality Assessor" if self.path == "/api/quality-assess" else "Security Assessor"
+            if self.path == "/api/quality-assess":
+                label = "Quality Assessor"
+            elif self.path == "/api/deployment-verdict":
+                label = "Deployment Verdict"
+            else:
+                label = "Security Assessor"
             self.send_json(HTTPStatus.BAD_REQUEST, {
                 "error": f"{label} request failed: " + redact_text(str(exc)),
                 "route": self.path,

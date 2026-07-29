@@ -407,6 +407,33 @@
         font-size: 12px;
         line-height: 1.35;
       }
+      .deployment-verdict {
+        border-left: 4px solid var(--orange);
+      }
+      .deployment-verdict.pass {
+        border-left-color: #27855f;
+      }
+      .deployment-verdict.medium {
+        border-left-color: #d89000;
+      }
+      .deployment-verdict.fail {
+        border-left-color: #b21f2d;
+      }
+      .verdict-title-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .verdict-status {
+        font-size: 20px;
+        font-weight: 850;
+      }
+      .verdict-body {
+        display: grid;
+        gap: 12px;
+      }
       .table-wrap {
         overflow: auto;
       }
@@ -714,7 +741,8 @@ cannot comply</textarea>
       let activeMode = 'security';
       const tabState = {
         security: null,
-        quality: null
+        quality: null,
+        deploymentVerdict: null
       };
       const guardrailFields = {
         targetUrl: document.getElementById('target-url'),
@@ -810,6 +838,7 @@ cannot comply</textarea>
       function resetCachedReports() {
         tabState.security = null;
         tabState.quality = null;
+        tabState.deploymentVerdict = null;
         latestQualityFindings = [];
         setDecision('No assessment yet');
         renderLinks();
@@ -932,6 +961,55 @@ cannot comply</textarea>
             <h2>${escapeHtml(title)}</h2>
             <div class="card-body report-card-grid">${body}</div>
           </section>`;
+      }
+
+      function hasPackageSecurityResult() {
+        return tabState.security?.kind === 'assessment' && tabState.security?.payload?.findingCounts;
+      }
+
+      function hasQualityResult() {
+        return Boolean(tabState.quality?.findingCounts);
+      }
+
+      function renderDeploymentVerdict() {
+        const verdict = tabState.deploymentVerdict;
+        if (!verdict) return '';
+        const cssClass = verdict.className || 'medium';
+        return `
+          <section class="report-card deployment-verdict ${escapeHtml(cssClass)}">
+            <h2>Final Deployment Verdict</h2>
+            <div class="card-body verdict-body">
+              <div class="verdict-title-row">
+                <div class="verdict-status">${escapeHtml(verdict.status || 'Review required')}</div>
+                ${pill(verdict.status || 'Review required', cssClass)}
+              </div>
+              <dl class="kv">
+                <dt>Security decision</dt><dd>${escapeHtml(verdict.securityDecision || '')}</dd>
+                <dt>Quality decision</dt><dd>${escapeHtml(verdict.qualityDecision || '')}</dd>
+                <dt>Reason</dt><dd>${escapeHtml(verdict.reason || '')}</dd>
+                <dt>Required action</dt><dd>${escapeHtml(verdict.requiredAction || '')}</dd>
+              </dl>
+              <div>${renderMarkdown(verdict.advisory || 'AI deployment advisory was not generated.')}</div>
+            </div>
+          </section>`;
+      }
+
+      async function refreshDeploymentVerdict() {
+        if (!hasPackageSecurityResult() || !hasQualityResult()) {
+          tabState.deploymentVerdict = null;
+          return;
+        }
+        const response = await fetch('/api/deployment-verdict', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            security: tabState.security.payload,
+            quality: tabState.quality
+          })
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || 'Deployment verdict failed.');
+        tabState.deploymentVerdict = payload;
       }
 
       function renderMarkdown(value) {
@@ -1122,6 +1200,7 @@ cannot comply</textarea>
           </tr>`
         ];
         reportEl.innerHTML = `
+          ${renderDeploymentVerdict()}
           <section class="report-card">
             <h2>Assessment Summary</h2>
             <div class="card-body">
@@ -1227,6 +1306,7 @@ cannot comply</textarea>
           </tr>`;
         });
         reportEl.innerHTML = `
+          ${renderDeploymentVerdict()}
           <section class="report-card">
             <h2>Quality Assessment Summary</h2>
             <div class="card-body">
@@ -1304,10 +1384,18 @@ cannot comply</textarea>
             counters[key].textContent = payload.findingCounts?.[key] || 0;
           }
           tabState.security = { kind: 'assessment', payload };
+          try {
+            await refreshDeploymentVerdict();
+          } catch (verdictError) {
+            tabState.deploymentVerdict = null;
+            setStatus(`Assessment completed, but final deployment verdict failed: ${verdictError.message}`);
+          }
           renderReport(payload);
           renderLinks(payload.runId);
           renderGuardrailLinks();
-          setStatus(`Completed run ${payload.runId}. Components found: ${payload.componentCount}.`);
+          if (!statusEl.textContent.includes('final deployment verdict failed')) {
+            setStatus(`Completed run ${payload.runId}. Components found: ${payload.componentCount}.`);
+          }
         } catch (error) {
           setDecision('Failed');
           reportEl.innerHTML = `<div class="report-empty">${escapeHtml(error.message)}</div>`;
@@ -1363,6 +1451,7 @@ cannot comply</textarea>
           if (!response.ok) throw new Error(payload.error || 'Prompt guardrail test failed.');
           setDecision(payload.decision);
           tabState.security = { kind: 'guardrail', payload };
+          tabState.deploymentVerdict = null;
           renderGuardrailReport(payload);
           renderGuardrailLinks(payload.runId);
           renderLinks();
@@ -1410,9 +1499,17 @@ cannot comply</textarea>
           qualityCounters.medium.textContent = payload.findingCounts?.medium || 0;
           qualityCounters.low.textContent = payload.findingCounts?.low || 0;
           tabState.quality = payload;
+          try {
+            await refreshDeploymentVerdict();
+          } catch (verdictError) {
+            tabState.deploymentVerdict = null;
+            qualityStatusEl.textContent = `Quality completed, but final deployment verdict failed: ${verdictError.message}`;
+          }
           renderQualityReport(payload);
           renderQualityLinks(payload.runId);
-          qualityStatusEl.textContent = `Completed quality run ${payload.runId}. Score: ${payload.score || 0}/100.`;
+          if (!qualityStatusEl.textContent.includes('final deployment verdict failed')) {
+            qualityStatusEl.textContent = `Completed quality run ${payload.runId}. Score: ${payload.score || 0}/100.`;
+          }
         } catch (error) {
           setDecision('Failed');
           reportEl.innerHTML = `<div class="report-empty">${escapeHtml(error.message)}</div>`;
