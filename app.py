@@ -41,6 +41,15 @@ TEXT_EXTENSIONS = {
     ".env", ".txt", ".md", ".py", ".java", ".gradle", ".pom", ".lock", ".toml",
     ".ini", ".conf", ".cfg", ".sh", ".bat", ".ps1", ".sql", ".raml", ".html", ".css",
 }
+CONFIG_FILE_NAMES = {
+    ".env", ".env.local", "application.properties", "application.yml", "application.yaml",
+    "bootstrap.properties", "bootstrap.yml", "bootstrap.yaml", "config.json", "settings.py",
+}
+DEV_ENV_RE = re.compile(r"\b(dev|development|local|localhost|127\.0\.0\.1|staging|test|qa|sandbox)\b", re.I)
+URL_RE = re.compile(r"\bhttps?://[^\s\"'<>)}]+", re.I)
+COPYLEFT_LICENSE_RE = re.compile(r"\b(AGPL|GPL|LGPL|SSPL)\b", re.I)
+PERMISSIVE_LICENSE_RE = re.compile(r"\b(MIT|Apache|BSD|ISC|MPL)\b", re.I)
+UNPINNED_VERSION_RE = re.compile(r"^\s*(?:latest|\*|x|>=|>|~|\^)", re.I)
 
 CERTIFICATE_EXTENSIONS = {".crt", ".cer", ".pem", ".der"}
 KEYSTORE_EXTENSIONS = {".jks", ".keystore", ".p12", ".pfx"}
@@ -165,7 +174,7 @@ def should_read_as_text(file_path):
             return False
     except OSError:
         return False
-    return file_path.suffix.lower() in TEXT_EXTENSIONS or file_path.name.lower() in {"requirements.txt", "pipfile"} or file_path.name.lower().startswith(".env")
+    return file_path.suffix.lower() in TEXT_EXTENSIONS or file_path.name.lower() in {"requirements.txt", "pipfile", "license", "copying"} or file_path.name.lower().startswith(".env")
 
 
 def scan_secrets(files, extract_dir, findings):
@@ -352,6 +361,141 @@ def collect_dependency_inventory(files, extract_dir, findings):
     if not components:
         add_finding(findings, "low", "Dependency inventory", "No dependency manifest was found in the uploaded artifact.", {})
     return components
+
+
+def dependency_risk_review(components, findings):
+    unpinned = []
+    snapshots = []
+    for component in components:
+        version = str(component.get("version") or "")
+        if not version or version == "unspecified":
+            unpinned.append(component)
+        elif UNPINNED_VERSION_RE.search(version):
+            unpinned.append(component)
+        if "snapshot" in version.lower():
+            snapshots.append(component)
+    if unpinned:
+        add_finding(findings, "medium", "Dependency risk", "Unpinned or floating dependency versions were found.", {
+            "count": len(unpinned),
+            "examples": unpinned[:10],
+        })
+    if snapshots:
+        add_finding(findings, "medium", "Dependency risk", "Snapshot dependencies were found in the deployable artifact.", {
+            "count": len(snapshots),
+            "examples": snapshots[:10],
+        })
+    return {
+        "unpinnedCount": len(unpinned),
+        "snapshotCount": len(snapshots),
+    }
+
+
+def extract_license_values_from_text(file_path, text):
+    lower = file_path.name.lower()
+    values = []
+    try:
+        if lower == "package.json":
+            pkg = json.loads(text)
+            license_value = pkg.get("license")
+            if isinstance(license_value, str):
+                values.append(license_value)
+            elif isinstance(license_value, dict):
+                values.append(str(license_value.get("type") or license_value.get("name") or ""))
+            for item in pkg.get("licenses") or []:
+                if isinstance(item, str):
+                    values.append(item)
+                elif isinstance(item, dict):
+                    values.append(str(item.get("type") or item.get("name") or ""))
+        elif lower == "pyproject.toml":
+            match = re.search(r"(?m)^\s*license\s*=\s*([\"']?)(.+?)\1\s*$", text)
+            if match:
+                values.append(match.group(2).strip("{} "))
+        elif lower == "pom.xml":
+            values.extend(re.findall(r"<license>[\s\S]*?<name>(.*?)</name>[\s\S]*?</license>", text, re.I))
+        elif lower in {"license", "license.md", "license.txt", "copying"}:
+            values.append(text[:2000])
+    except Exception:
+        return values
+    return [value.strip() for value in values if value and value.strip()]
+
+
+def scan_license_risk(files, extract_dir, findings):
+    license_entries = []
+    manifest_count = 0
+    for file_path in files:
+        lower = file_path.name.lower()
+        if lower not in {"package.json", "pyproject.toml", "pom.xml", "license", "license.md", "license.txt", "copying"}:
+            continue
+        if not should_read_as_text(file_path):
+            continue
+        rel = str(file_path.relative_to(extract_dir))
+        text = file_path.read_text(errors="ignore")
+        values = extract_license_values_from_text(file_path, text)
+        if lower in {"package.json", "pyproject.toml", "pom.xml"}:
+            manifest_count += 1
+        for value in values:
+            entry = {"file": rel, "license": value[:160]}
+            license_entries.append(entry)
+            if COPYLEFT_LICENSE_RE.search(value):
+                add_finding(findings, "medium", "License risk", "Copyleft or restricted license evidence was found. Confirm license compatibility before deployment.", entry)
+            elif not PERMISSIVE_LICENSE_RE.search(value) and lower not in {"license", "license.md", "license.txt", "copying"}:
+                add_finding(findings, "low", "License risk", "Dependency or project license is present but not recognized by the simple allowlist.", entry)
+    if manifest_count and not license_entries:
+        add_finding(findings, "low", "License risk", "No project license metadata was found in recognized manifests.", {})
+    return {
+        "licenseEntries": license_entries[:100],
+        "licenseCount": len(license_entries),
+    }
+
+
+def scan_configuration_security(files, extract_dir, findings):
+    config_files = []
+    hardcoded_urls = []
+    unsafe_defaults = []
+    dev_references = []
+    for file_path in files:
+        if not should_read_as_text(file_path):
+            continue
+        rel = str(file_path.relative_to(extract_dir))
+        lower_name = file_path.name.lower()
+        is_config = lower_name in CONFIG_FILE_NAMES or file_path.suffix.lower() in {".properties", ".yml", ".yaml", ".json", ".toml", ".ini", ".conf", ".cfg"}
+        if not is_config:
+            continue
+        config_files.append(rel)
+        text = file_path.read_text(errors="ignore")
+        urls = [url for url in URL_RE.findall(text) if DEV_ENV_RE.search(url)]
+        if urls:
+            hardcoded_urls.append({"file": rel, "urls": urls[:5]})
+        for idx, line in enumerate(text.splitlines(), start=1):
+            lowered = line.lower()
+            if re.search(r"\b(debug|trace)\s*[:=]\s*(true|1|yes|on)\b", lowered):
+                unsafe_defaults.append({"file": rel, "line": idx, "setting": line.strip()[:160]})
+            if re.search(r"\b(tls|ssl|verify|certificate|rejectunauthorized)\b.*\b(false|0|off|disabled)\b", lowered):
+                unsafe_defaults.append({"file": rel, "line": idx, "setting": line.strip()[:160]})
+            if DEV_ENV_RE.search(line) and not line.lstrip().startswith("#"):
+                dev_references.append({"file": rel, "line": idx, "text": line.strip()[:160]})
+    if hardcoded_urls:
+        add_finding(findings, "medium", "Configuration security", "Environment-specific or non-production URLs were found in packaged config.", {
+            "count": len(hardcoded_urls),
+            "examples": hardcoded_urls[:10],
+        })
+    if unsafe_defaults:
+        add_finding(findings, "high", "Configuration security", "Unsafe runtime defaults were found in packaged config.", {
+            "count": len(unsafe_defaults),
+            "examples": unsafe_defaults[:10],
+        })
+    if dev_references:
+        add_finding(findings, "low", "Configuration security", "Development/test environment references were found in packaged config.", {
+            "count": len(dev_references),
+            "examples": dev_references[:10],
+        })
+    return {
+        "configFiles": config_files[:100],
+        "configFileCount": len(config_files),
+        "hardcodedUrlCount": len(hardcoded_urls),
+        "unsafeDefaultCount": len(unsafe_defaults),
+        "devReferenceCount": len(dev_references),
+    }
 
 
 def find_npm_audit_targets(extract_dir):
@@ -574,6 +718,76 @@ def decision_for(findings):
     return "Approved for dev deployment"
 
 
+def score_status(score):
+    if score >= 90:
+        return "Good"
+    if score >= 75:
+        return "Review"
+    if score >= 60:
+        return "Needs attention"
+    return "Weak"
+
+
+def score_from_findings(findings, tasks, base=100):
+    weights = {"critical": 40, "high": 25, "medium": 10, "low": 3, "info": 0}
+    penalty = 0
+    for item in findings:
+        if item.get("task") in tasks:
+            penalty += weights.get(item.get("severity", "info"), 0)
+    return max(0, min(100, base - penalty))
+
+
+def security_report_card(assessment):
+    findings = assessment.get("findings") or []
+    npm_vulns = (assessment.get("npmAudit") or {}).get("vulnerabilityCount", 0) or 0
+    pip_vulns = (assessment.get("pipAudit") or {}).get("vulnerabilityCount", 0) or 0
+    cert_files = len((assessment.get("certificateScan") or {}).get("certificateFiles") or [])
+    dependency_risk = assessment.get("dependencyRisk") or {}
+    license_review = assessment.get("licenseReview") or {}
+    configuration_security = assessment.get("configurationSecurity") or {}
+    cards = [
+        {
+            "area": "Secrets safety",
+            "score": score_from_findings(findings, {"Secret scanning", "Archive path safety"}),
+            "status": "",
+            "detail": "Hardcoded secrets, private keys, credentialed URLs, and unsafe archive paths.",
+        },
+        {
+            "area": "Dependency risk",
+            "score": max(0, score_from_findings(findings, {"Known vulnerability scan", "Dependency risk", "Dependency inventory"}) - min(30, (npm_vulns + pip_vulns) * 5)),
+            "status": "",
+            "detail": f"{len(assessment.get('components') or [])} component(s), {npm_vulns + pip_vulns} known vulnerability item(s).",
+        },
+        {
+            "area": "Certificate/TLS",
+            "score": score_from_findings(findings, {"Certificate and TLS security", "Certificate inventory"}),
+            "status": "",
+            "detail": f"{cert_files} certificate/key/keystore file(s) reviewed.",
+        },
+        {
+            "area": "Config security",
+            "score": score_from_findings(findings, {"Configuration security"}),
+            "status": "",
+            "detail": f"{configuration_security.get('configFileCount', 0)} config file(s), {configuration_security.get('unsafeDefaultCount', 0)} unsafe default(s).",
+        },
+        {
+            "area": "License readiness",
+            "score": score_from_findings(findings, {"License risk"}),
+            "status": "",
+            "detail": f"{license_review.get('licenseCount', 0)} license evidence item(s) reviewed.",
+        },
+        {
+            "area": "SBOM readiness",
+            "score": 100 if assessment.get("sbom") else 0,
+            "status": "",
+            "detail": "CycloneDX-lite dependency inventory generated.",
+        },
+    ]
+    for card in cards:
+        card["status"] = score_status(card["score"])
+    return cards
+
+
 def create_sbom(artifact, components):
     return {
         "bomFormat": "CycloneDX-lite",
@@ -611,6 +825,9 @@ def run_llm_review(assessment):
         "findings": assessment["findings"],
         "dependencySample": assessment["components"][:60],
         "certificateScan": assessment.get("certificateScan"),
+        "dependencyRisk": assessment.get("dependencyRisk"),
+        "licenseReview": assessment.get("licenseReview"),
+        "configurationSecurity": assessment.get("configurationSecurity"),
         "npmAudit": assessment.get("npmAudit"),
         "pipAudit": assessment.get("pipAudit"),
     })
@@ -1217,6 +1434,9 @@ def build_markdown_report(assessment):
         "| Secret scanning | Checks text files for hardcoded keys, tokens, private keys, credentialed URLs, and sensitive assignments. | Completed |",
         "| Certificate and TLS security | Checks packaged certificates, private keys, and keystores. | Completed |",
         "| Dependency inventory | Extracts npm, Python, Maven, manifest, and nested JAR component evidence where present. | Completed |",
+        "| Dependency risk | Flags unpinned, floating, and snapshot dependency versions. | Completed |",
+        "| License risk | Reviews project and manifest license evidence for compatibility review. | Completed |",
+        "| Configuration security | Checks packaged config for unsafe defaults and environment-specific endpoints. | Completed |",
         f"| npm vulnerability scan | Runs npm audit for every package.json + package-lock.json pair found, including nested client apps. | {'Completed' if assessment['npmAudit']['attempted'] else 'Not applicable'} |",
         f"| Python vulnerability scan | Runs pip-audit for requirements.txt and pyproject.toml targets. | {'Completed' if assessment['pipAudit']['attempted'] else 'Not applicable'} |",
         "| SBOM generation | Generates a CycloneDX-lite JSON dependency inventory. | Completed |",
@@ -1229,6 +1449,15 @@ def build_markdown_report(assessment):
     ]
     for severity in ["critical", "high", "medium", "low", "info"]:
         lines.append(f"| {severity} | {assessment['findingCounts'].get(severity, 0)} |")
+    lines.extend([
+        "",
+        "## Security Report Card",
+        "",
+        "| Area | Score | Status | Evidence Basis |",
+        "| --- | ---: | --- | --- |",
+    ])
+    for card in assessment.get("reportCard") or []:
+        lines.append(f"| {card.get('area', '')} | {card.get('score', 0)} | {card.get('status', '')} | {card.get('detail', '')} |")
     for severity in ["critical", "high", "medium", "low", "info"]:
         items = [item for item in assessment["findings"] if item["severity"] == severity]
         if not items:
@@ -1294,6 +1523,20 @@ def build_markdown_report(assessment):
     ])
     for component in assessment["components"][:150]:
         lines.append(f"| {component['ecosystem']} | {component['name']} | {component['version']} | {component['sourceFile']} |")
+    dependency_risk = assessment.get("dependencyRisk") or {}
+    license_review = assessment.get("licenseReview") or {}
+    configuration_security = assessment.get("configurationSecurity") or {}
+    lines.extend([
+        "",
+        "## Dependency, License, and Configuration Risk",
+        "",
+        f"- Unpinned/floating dependencies: {dependency_risk.get('unpinnedCount', 0)}",
+        f"- Snapshot dependencies: {dependency_risk.get('snapshotCount', 0)}",
+        f"- License entries reviewed: {license_review.get('licenseCount', 0)}",
+        f"- Config files reviewed: {configuration_security.get('configFileCount', 0)}",
+        f"- Environment-specific URL references: {configuration_security.get('hardcodedUrlCount', 0)}",
+        f"- Unsafe runtime defaults: {configuration_security.get('unsafeDefaultCount', 0)}",
+    ])
     lines.extend([
         "",
         "## LLM Review",
@@ -1433,6 +1676,41 @@ def pip_audit_rows(pip_audit):
     return rows
 
 
+def security_readiness_rows(assessment):
+    dependency_risk = assessment.get("dependencyRisk") or {}
+    license_review = assessment.get("licenseReview") or {}
+    configuration_security = assessment.get("configurationSecurity") or {}
+    rows = [
+        style_header(["Area", "Metric", "Value"]),
+        ["Dependency risk", "Unpinned/floating dependencies", dependency_risk.get("unpinnedCount", 0)],
+        ["Dependency risk", "Snapshot dependencies", dependency_risk.get("snapshotCount", 0)],
+        ["License risk", "License entries reviewed", license_review.get("licenseCount", 0)],
+        ["Configuration security", "Config files reviewed", configuration_security.get("configFileCount", 0)],
+        ["Configuration security", "Environment-specific URL references", configuration_security.get("hardcodedUrlCount", 0)],
+        ["Configuration security", "Unsafe runtime defaults", configuration_security.get("unsafeDefaultCount", 0)],
+        ["Configuration security", "Development/test references", configuration_security.get("devReferenceCount", 0)],
+    ]
+    for item in (license_review.get("licenseEntries") or [])[:50]:
+        rows.append(["License evidence", item.get("file", ""), item.get("license", "")])
+    for item in (configuration_security.get("configFiles") or [])[:50]:
+        rows.append(["Config evidence", "File", item])
+    return rows
+
+
+def report_card_rows(report_card):
+    rows = [style_header(["Area", "Score", "Status", "Evidence Basis"])]
+    for item in report_card or []:
+        rows.append([
+            item.get("area", ""),
+            item.get("score", 0),
+            item.get("status", ""),
+            item.get("detail", ""),
+        ])
+    if len(rows) == 1:
+        rows.append(["Security", 0, "No data", "No report card data was generated."])
+    return rows
+
+
 def build_xlsx_report(assessment):
     summary_rows = [
         [{"value": "Package Security Assessment Report", "style": 2}],
@@ -1457,15 +1735,20 @@ def build_xlsx_report(assessment):
         ["Secret scanning", "Completed"],
         ["Certificate and TLS security", "Completed"],
         ["Dependency inventory", "Completed"],
+        ["Dependency risk", "Completed"],
+        ["License risk", "Completed"],
+        ["Configuration security", "Completed"],
         ["npm audit", "Completed" if assessment["npmAudit"].get("attempted") else "Not applicable"],
         ["pip-audit", "Completed" if assessment["pipAudit"].get("attempted") else "Not applicable"],
         ["SBOM generation", "Completed"],
     ])
     sheets = [
         ("Summary", summary_rows, [32, 90]),
+        ("Report Card", report_card_rows(assessment.get("reportCard") or []), [30, 12, 20, 90]),
         ("Findings", finding_rows(assessment["findings"]), [16, 28, 80, 80]),
         ("Certificates", certificate_rows(assessment.get("certificateScan") or {}), [16, 42, 18, 12, 50, 50, 24, 60]),
         ("Components", component_rows(assessment["components"]), [24, 42, 22, 48]),
+        ("Security Readiness", security_readiness_rows(assessment), [28, 42, 90]),
         ("npm Audit", npm_audit_rows(assessment["npmAudit"]), [36, 18, 18, 60]),
         ("Python Audit", pip_audit_rows(assessment["pipAudit"]), [36, 48, 18, 18, 18, 60]),
     ]
@@ -1567,6 +1850,9 @@ def assess_artifact(file_name, content_base64):
     secret_scan = scan_secrets(files, extract_dir, findings)
     certificate_scan = scan_certificates(files, extract_dir, findings)
     components = collect_dependency_inventory(files, extract_dir, findings)
+    dependency_risk = dependency_risk_review(components, findings)
+    license_review = scan_license_risk(files, extract_dir, findings)
+    configuration_security = scan_configuration_security(files, extract_dir, findings)
     npm_audit = run_npm_audit_if_possible(extract_dir, findings)
     pip_audit = run_pip_audit_if_possible(extract_dir, findings)
     finding_counts = {}
@@ -1579,6 +1865,9 @@ def assess_artifact(file_name, content_base64):
         "archive": archive,
         "secretScan": secret_scan,
         "certificateScan": certificate_scan,
+        "dependencyRisk": dependency_risk,
+        "licenseReview": license_review,
+        "configurationSecurity": configuration_security,
         "npmAudit": npm_audit,
         "pipAudit": pip_audit,
         "components": components,
@@ -1587,6 +1876,7 @@ def assess_artifact(file_name, content_base64):
         "decision": decision_for(findings),
     }
     assessment["sbom"] = create_sbom(artifact, components)
+    assessment["reportCard"] = security_report_card(assessment)
     assessment["llmReview"] = run_llm_review(assessment)
     assessment["reportMarkdown"] = build_markdown_report(assessment)
     report_excel = build_xlsx_report(assessment)
@@ -1632,6 +1922,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "findingTotal": result["findingTotal"],
                     "displayFindingTotal": result["displayFindingTotal"],
                     "findingDensity": result["findingDensity"],
+                    "reportCard": result["reportCard"],
                     "findings": result["findings"],
                     "metrics": result["metrics"],
                     "llmReview": result["llmReview"],
@@ -1665,6 +1956,10 @@ class Handler(SimpleHTTPRequestHandler):
                 "components": result["components"][:150],
                 "componentCount": len(result["components"]),
                 "certificateScan": result["certificateScan"],
+                "dependencyRisk": result["dependencyRisk"],
+                "licenseReview": result["licenseReview"],
+                "configurationSecurity": result["configurationSecurity"],
+                "reportCard": result["reportCard"],
                 "npmAudit": result["npmAudit"],
                 "pipAudit": result["pipAudit"],
                 "llmReview": result["llmReview"],

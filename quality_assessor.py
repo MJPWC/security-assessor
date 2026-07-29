@@ -20,6 +20,12 @@ QUALITY_EXTENSIONS = {
     ".yml", ".toml", ".properties", ".md", ".html", ".css", ".scss",
 }
 SKIP_DIRS = {"node_modules", "dist", "build", "target", ".git", ".venv", "venv", "__pycache__"}
+BUILD_MANIFEST_NAMES = {"package.json", "pom.xml", "build.gradle", "gradlew", "pyproject.toml", "requirements.txt", "setup.py"}
+CI_FILE_NAMES = {".github/workflows", ".gitlab-ci.yml", "jenkinsfile", "azure-pipelines.yml", "bitbucket-pipelines.yml"}
+OPERATIONAL_FILE_NAMES = {"dockerfile", "procfile", "docker-compose.yml", "docker-compose.yaml"}
+RELEASE_NOTE_NAMES = {"readme.md", "changelog.md", "release-notes.md", "releasenotes.md", "release.md"}
+HEALTH_RE = re.compile(r"\b(health|healthcheck|readiness|liveness|actuator/health)\b", re.I)
+VERSION_RE = re.compile(r"\b(version|implementation-version|revision|commit|build[-_]?time)\b", re.I)
 SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
 SEVERITY_SORT = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 QUALITY_SCORE_WEIGHTS = {"critical": 30, "high": 15, "medium": 3, "low": 0.25, "info": 0}
@@ -168,6 +174,81 @@ def scan_text_quality(files, root_dir):
     return findings, {"textFiles": len(text_files), "sourceFiles": len(source_files), "testFiles": len(test_files)}
 
 
+def scan_deployment_readiness(files, root_dir, metrics):
+    findings = []
+    rel_files = [relative(path, root_dir) for path in files]
+    lower_names = {path.name.lower() for path in files}
+    lower_paths = {relative(path, root_dir).lower() for path in files}
+    source_files = metrics.get("sourceFiles", 0) or 0
+
+    build_manifests = [
+        rel for rel in rel_files
+        if Path(rel).name.lower() in BUILD_MANIFEST_NAMES or rel.lower().endswith((".jar", ".war", ".whl"))
+    ]
+    if source_files and not build_manifests:
+        add_finding(findings, "medium", "Build readiness", "Build manifest missing", "No recognized build manifest or deployable artifact was found.", "")
+
+    packaged_artifacts = [rel for rel in rel_files if rel.lower().endswith((".jar", ".war", ".whl"))]
+    if build_manifests and not packaged_artifacts and not any(name in lower_names for name in {"package.json", "pyproject.toml"}):
+        add_finding(findings, "low", "Build readiness", "Deployable artifact evidence missing", "Build metadata exists, but no packaged JAR/WAR/wheel artifact was found in the upload.", "")
+
+    ci_files = [
+        rel for rel in lower_paths
+        if rel in CI_FILE_NAMES or rel.startswith(".github/workflows/")
+    ]
+    if source_files and not ci_files:
+        add_finding(findings, "low", "Test evidence", "CI evidence missing", "No recognized CI workflow file was found in the uploaded package.", "")
+
+    coverage_files = [
+        rel for rel in lower_paths
+        if "coverage" in rel or rel.endswith(("jacoco.xml", "coverage.xml", "lcov.info"))
+    ]
+    if metrics.get("testFiles", 0) and not coverage_files:
+        add_finding(findings, "low", "Test evidence", "Coverage evidence missing", "Tests were detected, but no coverage report or coverage metadata was found.", "")
+
+    operational_files = [
+        rel for rel in rel_files
+        if Path(rel).name.lower() in OPERATIONAL_FILE_NAMES or any(part in rel.lower() for part in ["k8s/", "kubernetes/", "helm/", "deployment.yaml", "deployment.yml"])
+    ]
+    if source_files and not operational_files:
+        add_finding(findings, "low", "Operational readiness", "Runtime packaging metadata missing", "No Dockerfile, Procfile, Kubernetes, Helm, or compose metadata was found.", "")
+
+    health_evidence = []
+    version_evidence = []
+    for path in files:
+        if not is_text_file(path):
+            continue
+        rel = relative(path, root_dir)
+        try:
+            text = path.read_text(errors="ignore")
+        except OSError:
+            continue
+        if HEALTH_RE.search(text):
+            health_evidence.append(rel)
+        if VERSION_RE.search(text) and Path(rel).name.lower() in {"package.json", "pom.xml", "pyproject.toml", "manifest.mf"}:
+            version_evidence.append(rel)
+    if source_files and not health_evidence:
+        add_finding(findings, "low", "Operational readiness", "Health check evidence missing", "No health/readiness/liveness endpoint or metadata was found in scanned text files.", "")
+
+    if not version_evidence and not packaged_artifacts:
+        add_finding(findings, "low", "Deployment metadata", "Version metadata missing", "No obvious version, commit, or build metadata was found in recognized manifests.", "")
+
+    release_notes = [rel for rel in lower_paths if Path(rel).name.lower() in RELEASE_NOTE_NAMES]
+    if "readme.md" not in lower_names and not release_notes:
+        add_finding(findings, "low", "Deployment metadata", "Release documentation missing", "No README, changelog, or release notes file was found.", "")
+
+    return findings, {
+        "buildManifestCount": len(build_manifests),
+        "packagedArtifactCount": len(packaged_artifacts),
+        "ciFileCount": len(ci_files),
+        "coverageFileCount": len(coverage_files),
+        "operationalFileCount": len(operational_files),
+        "healthEvidenceCount": len(set(health_evidence)),
+        "versionEvidenceCount": len(set(version_evidence)),
+        "releaseNoteCount": len(release_notes),
+    }
+
+
 def sorted_findings(findings):
     return sorted(
         findings,
@@ -253,12 +334,95 @@ def decision_for(score):
     return "Quality gate passed"
 
 
+def report_card_status(score):
+    if score >= 90:
+        return "Good"
+    if score >= 75:
+        return "Review"
+    if score >= 60:
+        return "Needs attention"
+    return "Weak"
+
+
+def score_for_categories(findings, categories, base=100):
+    weights = {"critical": 35, "high": 20, "medium": 10, "low": 3, "info": 0}
+    penalty = 0
+    for item in findings:
+        if item.get("category") in categories:
+            penalty += weights.get(item.get("severity", "info"), 0) * int(item.get("count", 1) or 1)
+    return max(0, min(100, base - penalty))
+
+
+def build_report_card(findings, metrics):
+    readiness = metrics.get("readiness") or {}
+    source_files = metrics.get("sourceFiles", 0) or 0
+    test_files = metrics.get("testFiles", 0) or 0
+    build_score = 100
+    if source_files and not readiness.get("buildManifestCount"):
+        build_score -= 35
+    if not readiness.get("packagedArtifactCount") and not readiness.get("buildManifestCount"):
+        build_score -= 15
+    test_score = score_for_categories(findings, {"Testability", "Test evidence"})
+    if source_files and not test_files:
+        test_score = min(test_score, 60)
+    if test_files and not readiness.get("coverageFileCount"):
+        test_score = min(test_score, 80)
+    operational_score = score_for_categories(findings, {"Operational readiness"})
+    if source_files and not readiness.get("operationalFileCount"):
+        operational_score = min(operational_score, 75)
+    if source_files and not readiness.get("healthEvidenceCount"):
+        operational_score = min(operational_score, 70)
+    documentation_score = score_for_categories(findings, {"Documentation", "Deployment metadata"})
+    cards = [
+        {
+            "area": "Maintainability",
+            "score": score_for_categories(findings, {"Maintainability", "Readability", "Code hygiene", "Dependency hygiene"}),
+            "status": "",
+            "detail": "Large files, long lines, debug output, open markers, and dependency hygiene.",
+        },
+        {
+            "area": "Reliability",
+            "score": score_for_categories(findings, {"Reliability"}),
+            "status": "",
+            "detail": "Exception handling and reliability-related static signals.",
+        },
+        {
+            "area": "Testability",
+            "score": test_score,
+            "status": "",
+            "detail": f"{test_files} test file(s), {readiness.get('ciFileCount', 0)} CI file(s), {readiness.get('coverageFileCount', 0)} coverage file(s).",
+        },
+        {
+            "area": "Build readiness",
+            "score": max(0, min(100, build_score)),
+            "status": "",
+            "detail": f"{readiness.get('buildManifestCount', 0)} build manifest(s), {readiness.get('packagedArtifactCount', 0)} packaged artifact(s).",
+        },
+        {
+            "area": "Operational readiness",
+            "score": operational_score,
+            "status": "",
+            "detail": f"{readiness.get('operationalFileCount', 0)} runtime metadata file(s), {readiness.get('healthEvidenceCount', 0)} health evidence file(s).",
+        },
+        {
+            "area": "Documentation",
+            "score": documentation_score,
+            "status": "",
+            "detail": f"{readiness.get('releaseNoteCount', 0)} release note/readme evidence file(s), {readiness.get('versionEvidenceCount', 0)} version metadata file(s).",
+        },
+    ]
+    for card in cards:
+        card["status"] = report_card_status(card["score"])
+    return cards
+
+
 def build_markdown_report(result):
     score_details = result.get("scoreDetails") or {}
     penalties = score_details.get("penalties") or {}
     text_files = result["metrics"].get("textFiles", 0) or 0
     source_files = result["metrics"].get("sourceFiles", 0) or 0
     finding_total = result.get("findingTotal", len(result.get("findings") or []))
+    readiness = result["metrics"].get("readiness") or {}
     findings_per_text_file = round(finding_total / text_files, 2) if text_files else 0
     findings_per_source_file = round(finding_total / source_files, 2) if source_files else 0
     lines = [
@@ -276,6 +440,11 @@ def build_markdown_report(result):
         f"- Text files scanned: {result['metrics']['textFiles']}",
         f"- Source files scanned: {result['metrics']['sourceFiles']}",
         f"- Test files detected: {result['metrics']['testFiles']}",
+        f"- Build manifests/artifacts detected: {readiness.get('buildManifestCount', 0)} / {readiness.get('packagedArtifactCount', 0)}",
+        f"- CI files detected: {readiness.get('ciFileCount', 0)}",
+        f"- Operational metadata files detected: {readiness.get('operationalFileCount', 0)}",
+        f"- Health check evidence files: {readiness.get('healthEvidenceCount', 0)}",
+        f"- Version metadata files: {readiness.get('versionEvidenceCount', 0)}",
         f"- Raw findings: {finding_total}",
         f"- Displayed finding rows: {result.get('displayFindingTotal', len(result.get('findings') or []))}",
         f"- Findings per text file: {findings_per_text_file}",
@@ -292,6 +461,15 @@ def build_markdown_report(result):
         lines.append(f"| {severity} | {result['findingCounts'].get(severity, 0)} | {penalties.get(severity, 0)} |")
     lines.extend([
         f"| total | {finding_total} | {score_details.get('penalty', 0)} |",
+        "",
+        "## Quality Report Card",
+        "",
+        "| Area | Score | Status | Evidence Basis |",
+        "| --- | ---: | --- | --- |",
+    ])
+    for card in result.get("reportCard") or []:
+        lines.append(f"| {card.get('area', '')} | {card.get('score', 0)} | {card.get('status', '')} | {card.get('detail', '')} |")
+    lines.extend([
         "",
         "## LLM Quality Review",
         "",
@@ -423,10 +601,25 @@ def quality_occurrence_rows(findings):
     return rows
 
 
+def report_card_rows(report_card):
+    rows = [style_header(["Area", "Score", "Status", "Evidence Basis"])]
+    for item in report_card or []:
+        rows.append([
+            item.get("area", ""),
+            item.get("score", 0),
+            item.get("status", ""),
+            item.get("detail", ""),
+        ])
+    if len(rows) == 1:
+        rows.append(["Quality", 0, "No data", "No report card data was generated."])
+    return rows
+
+
 def build_xlsx_report(result):
     score_details = result.get("scoreDetails") or {}
     penalties = score_details.get("penalties") or {}
     density = result.get("findingDensity") or {}
+    readiness = result["metrics"].get("readiness") or {}
     summary_rows = [
         [{"value": "Code Quality Assessment Report", "style": 2}],
         [],
@@ -442,6 +635,14 @@ def build_xlsx_report(result):
         ["Text files scanned", result["metrics"]["textFiles"]],
         ["Source files scanned", result["metrics"]["sourceFiles"]],
         ["Test files detected", result["metrics"]["testFiles"]],
+        ["Build manifests detected", readiness.get("buildManifestCount", 0)],
+        ["Packaged artifacts detected", readiness.get("packagedArtifactCount", 0)],
+        ["CI files detected", readiness.get("ciFileCount", 0)],
+        ["Coverage files detected", readiness.get("coverageFileCount", 0)],
+        ["Operational metadata files detected", readiness.get("operationalFileCount", 0)],
+        ["Health evidence files", readiness.get("healthEvidenceCount", 0)],
+        ["Version metadata files", readiness.get("versionEvidenceCount", 0)],
+        ["Release note files", readiness.get("releaseNoteCount", 0)],
         ["Raw findings", result.get("findingTotal", len(result.get("findings") or []))],
         ["Displayed finding rows", result.get("displayFindingTotal", len(result.get("findings") or []))],
         ["Findings per text file", density.get("perTextFile", 0)],
@@ -460,6 +661,7 @@ def build_xlsx_report(result):
     ]
     sheets = [
         ("Summary", summary_rows, [28, 90]),
+        ("Report Card", report_card_rows(result.get("reportCard") or []), [30, 12, 20, 90]),
         ("Findings", quality_finding_rows(result["findings"]), [14, 10, 22, 34, 48, 10, 80]),
         ("Occurrences", quality_occurrence_rows(result["findings"]), [14, 22, 34, 60, 10, 80]),
         ("LLM Review", llm_rows, [22, 120]),
@@ -590,12 +792,16 @@ def assess_quality(file_name, content_base64, runs_dir, llm_reviewer=None):
     archive = extract_artifact(artifact_path, extract_dir, artifact["type"])
     files = walk_files(extract_dir)
     raw_findings, metrics = scan_text_quality(files, extract_dir)
+    readiness_findings, readiness_metrics = scan_deployment_readiness(files, extract_dir, metrics)
+    raw_findings.extend(readiness_findings)
+    metrics["readiness"] = readiness_metrics
     counts = {}
     for item in raw_findings:
         counts[item["severity"]] = counts.get(item["severity"], 0) + 1
     score_details = quality_score_details(raw_findings)
     score = score_details["score"]
     findings = summarize_quality_findings(raw_findings)
+    report_card = build_report_card(raw_findings, metrics)
     text_file_count = metrics.get("textFiles", 0) or 0
     source_file_count = metrics.get("sourceFiles", 0) or 0
     finding_density = {
@@ -615,6 +821,7 @@ def assess_quality(file_name, content_base64, runs_dir, llm_reviewer=None):
         "findingTotal": len(raw_findings),
         "displayFindingTotal": len(findings),
         "findingDensity": finding_density,
+        "reportCard": report_card,
         "findings": findings,
         "llmReview": "",
     }

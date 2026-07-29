@@ -8,11 +8,15 @@ This is a Python MVP web app for assessing deployable application packages befor
 - Hardcoded secrets in packaged text files.
 - Packaged certificate, keystore, and private key review.
 - npm, Python, Maven, manifest, and nested JAR dependency inventory.
+- Dependency risk checks for floating, unpinned, and snapshot versions.
+- License and packaged configuration security readiness checks.
 - `npm audit` for every package folder that has both `package.json` and `package-lock.json`, including nested frontend apps such as `client/`.
 - `pip-audit` for Python dependency manifests such as `requirements.txt` and `pyproject.toml` when the `pip-audit` command is installed.
 - CycloneDX-lite SBOM generation.
 - LLM security review using Security Assessor's local LLM configuration.
 - Optional LLM quality review using the same Security Assessor LLM configuration.
+- Quality readiness checks for build metadata, test/CI evidence, operational metadata, health evidence, version metadata, and release notes.
+- Security and quality report-card summaries with sub-area readiness scores.
 
 The security LLM receives only redacted assessment metadata, not the raw uploaded package contents. Quality LLM review receives static quality findings plus bounded redacted code samples.
 

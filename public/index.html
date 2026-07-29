@@ -351,6 +351,62 @@
         min-width: 0;
         overflow-wrap: anywhere;
       }
+      .report-card-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 10px;
+      }
+      .score-card {
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        padding: 11px;
+        background: #fff;
+        display: grid;
+        gap: 7px;
+      }
+      .score-card-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      .score-card-title {
+        font-weight: 800;
+        color: var(--ink);
+      }
+      .score-card-score {
+        font-weight: 850;
+        font-size: 18px;
+        color: var(--ink);
+      }
+      .score-track {
+        height: 8px;
+        border-radius: 999px;
+        background: #eee9e3;
+        overflow: hidden;
+      }
+      .score-fill {
+        height: 100%;
+        border-radius: inherit;
+        background: var(--orange);
+      }
+      .score-fill.good {
+        background: #27855f;
+      }
+      .score-fill.review {
+        background: #d89000;
+      }
+      .score-fill.needs-attention {
+        background: #d04a02;
+      }
+      .score-fill.weak {
+        background: #b21f2d;
+      }
+      .score-card-detail {
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.35;
+      }
       .table-wrap {
         overflow: auto;
       }
@@ -770,6 +826,38 @@ cannot comply</textarea>
         return `<div class="table-wrap"><table><thead><tr>${headers.map(h => `<th>${escapeHtml(h)}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table></div>`;
       }
 
+      function scoreClass(value) {
+        const score = Number(value) || 0;
+        if (score >= 90) return 'good';
+        if (score >= 75) return 'review';
+        if (score >= 60) return 'needs-attention';
+        return 'weak';
+      }
+
+      function renderReportCard(title, cards) {
+        const items = cards || [];
+        if (!items.length) return '';
+        const body = items.map(item => {
+          const score = Math.max(0, Math.min(100, Number(item.score) || 0));
+          const cssClass = scoreClass(score);
+          return `
+            <article class="score-card">
+              <div class="score-card-top">
+                <span class="score-card-title">${escapeHtml(item.area || '')}</span>
+                <span class="score-card-score">${escapeHtml(score)}/100</span>
+              </div>
+              <div class="score-track" aria-hidden="true"><div class="score-fill ${cssClass}" style="width:${score}%"></div></div>
+              <div>${pill(item.status || 'Review', cssClass)}</div>
+              <p class="score-card-detail">${escapeHtml(item.detail || '')}</p>
+            </article>`;
+        }).join('');
+        return `
+          <section class="report-card">
+            <h2>${escapeHtml(title)}</h2>
+            <div class="card-body report-card-grid">${body}</div>
+          </section>`;
+      }
+
       function renderMarkdown(value) {
         const lines = String(value || '').replace(/\r\n/g, '\n').split('\n');
         const html = [];
@@ -918,6 +1006,9 @@ cannot comply</textarea>
         const components = payload.components || [];
         const npmAudit = payload.npmAudit || {};
         const pipAudit = payload.pipAudit || {};
+        const dependencyRisk = payload.dependencyRisk || {};
+        const licenseReview = payload.licenseReview || {};
+        const configurationSecurity = payload.configurationSecurity || {};
         const findingRows = findings.map(item => `
           <tr>
             <td>${pill(item.severity, item.severity)}</td>
@@ -967,6 +1058,7 @@ cannot comply</textarea>
               </dl>
             </div>
           </section>
+          ${renderReportCard('Security Report Card', payload.reportCard)}
           <section class="report-card">
             <h2>Findings</h2>
             ${renderTable(['Severity', 'Task', 'Details'], findingRows, 'No findings were reported.')}
@@ -978,6 +1070,19 @@ cannot comply</textarea>
           <section class="report-card">
             <h2>Dependency Sample</h2>
             ${renderTable(['Ecosystem', 'Name', 'Version'], componentRows, 'No dependency components were found.')}
+          </section>
+          <section class="report-card">
+            <h2>Security Readiness</h2>
+            <div class="card-body">
+              <dl class="kv">
+                <dt>Unpinned dependencies</dt><dd>${escapeHtml(dependencyRisk.unpinnedCount || 0)}</dd>
+                <dt>Snapshot dependencies</dt><dd>${escapeHtml(dependencyRisk.snapshotCount || 0)}</dd>
+                <dt>License entries</dt><dd>${escapeHtml(licenseReview.licenseCount || 0)}</dd>
+                <dt>Config files</dt><dd>${escapeHtml(configurationSecurity.configFileCount || 0)}</dd>
+                <dt>Env-specific URLs</dt><dd>${escapeHtml(configurationSecurity.hardcodedUrlCount || 0)}</dd>
+                <dt>Unsafe defaults</dt><dd>${escapeHtml(configurationSecurity.unsafeDefaultCount || 0)}</dd>
+              </dl>
+            </div>
           </section>
           <section class="report-card">
             <h2>Dependency Vulnerability Scans</h2>
@@ -1027,6 +1132,7 @@ cannot comply</textarea>
       function renderQualityReport(payload) {
         const counts = payload.findingCounts || {};
         const metrics = payload.metrics || {};
+        const readiness = metrics.readiness || {};
         const llmStatus = payload.llmStatus || {};
         const scoreDetails = payload.scoreDetails || {};
         const penalties = scoreDetails.penalties || {};
@@ -1055,6 +1161,10 @@ cannot comply</textarea>
                 <dt>Text files</dt><dd>${escapeHtml(metrics.textFiles || 0)}</dd>
                 <dt>Source files</dt><dd>${escapeHtml(metrics.sourceFiles || 0)}</dd>
                 <dt>Test files</dt><dd>${escapeHtml(metrics.testFiles || 0)}</dd>
+                <dt>Build evidence</dt><dd>${escapeHtml(readiness.buildManifestCount || 0)} manifest(s) · ${escapeHtml(readiness.packagedArtifactCount || 0)} artifact(s)</dd>
+                <dt>Test evidence</dt><dd>${escapeHtml(readiness.ciFileCount || 0)} CI file(s) · ${escapeHtml(readiness.coverageFileCount || 0)} coverage file(s)</dd>
+                <dt>Ops evidence</dt><dd>${escapeHtml(readiness.operationalFileCount || 0)} runtime file(s) · ${escapeHtml(readiness.healthEvidenceCount || 0)} health evidence file(s)</dd>
+                <dt>Release evidence</dt><dd>${escapeHtml(readiness.versionEvidenceCount || 0)} version file(s) · ${escapeHtml(readiness.releaseNoteCount || 0)} release note file(s)</dd>
                 <dt>LLM provider</dt><dd>${escapeHtml(llmStatus.configured ? (llmStatus.providers || []).join(', ') : 'Not configured')}</dd>
                 <dt>Findings</dt><dd>Critical ${counts.critical || 0} · High ${counts.high || 0} · Medium ${counts.medium || 0} · Low ${counts.low || 0}</dd>
                 <dt>Score penalty</dt><dd>${escapeHtml(scoreDetails.penalty || 0)} points: Critical ${penalties.critical || 0}, High ${penalties.high || 0}, Medium ${penalties.medium || 0}, Low ${penalties.low || 0}</dd>
@@ -1063,6 +1173,7 @@ cannot comply</textarea>
               </dl>
             </div>
           </section>
+          ${renderReportCard('Quality Report Card', payload.reportCard)}
           <section class="report-card">
             <h2>LLM Quality Review</h2>
             <div class="card-body">${renderMarkdown(payload.llmReview || 'LLM review was not requested or no provider was configured.')}</div>
