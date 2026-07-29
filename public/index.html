@@ -1200,7 +1200,6 @@ cannot comply</textarea>
           </tr>`
         ];
         reportEl.innerHTML = `
-          ${renderDeploymentVerdict()}
           <section class="report-card">
             <h2>Assessment Summary</h2>
             <div class="card-body">
@@ -1243,6 +1242,7 @@ cannot comply</textarea>
             <h2>Dependency Vulnerability Scans</h2>
             ${renderTable(['Scanner', 'Status', 'Vulnerabilities', 'Reason'], auditRows, 'No dependency vulnerability scanners were run.')}
           </section>
+          ${renderDeploymentVerdict()}
         `;
       }
 
@@ -1306,7 +1306,6 @@ cannot comply</textarea>
           </tr>`;
         });
         reportEl.innerHTML = `
-          ${renderDeploymentVerdict()}
           <section class="report-card">
             <h2>Quality Assessment Summary</h2>
             <div class="card-body">
@@ -1338,6 +1337,7 @@ cannot comply</textarea>
             <h2>Quality Findings by Severity</h2>
             ${renderTable(['Severity', 'Count', 'Category', 'Title', 'Locations', 'Action'], rows, 'No quality findings were reported.')}
           </section>
+          ${renderDeploymentVerdict()}
         `;
       }
 
