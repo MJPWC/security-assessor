@@ -7,7 +7,7 @@ import urllib.request
 from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent
-LLM_PROVIDER_SEQUENCE = ["anthropic", "groq", "openai", "gemini", "openrouter"]
+LLM_PROVIDER_SEQUENCE = ["anthropic_gateway", "anthropic", "groq", "openai", "gemini", "openrouter"]
 SENSITIVE_KEY_RE = re.compile(r"(api[_-]?key|apikey|token|secret|password|client[_-]?secret|clientSecret|authorization|x-api-key)", re.I)
 PLACEHOLDER_MARKERS = ["__replace", "replace_me", "your_", "placeholder", "change_me", "changeme", "dummy", "example"]
 
@@ -87,7 +87,14 @@ def first_env_value(*names):
 
 
 def provider_configs():
+    gateway_token = first_env_value("ANTHROPIC_GATEWAY_AUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN")
+    gateway_base_url = first_env_value("ANTHROPIC_GATEWAY_BASE_URL", "ANTHROPIC_BASE_URL")
     configs = [
+        (
+            "anthropic_gateway",
+            gateway_token if gateway_base_url else "",
+            os.getenv("ANTHROPIC_GATEWAY_MODEL") or os.getenv("ANTHROPIC_MODEL", "claude-3-7-sonnet-20250219"),
+        ),
         ("anthropic", first_env_value("ANTHROPIC_API_KEY"), os.getenv("ANTHROPIC_MODEL", "claude-3-7-sonnet-20250219")),
         ("groq", first_env_value("GROQ_API_KEY"), os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")),
         ("openai", first_env_value("OPENAI_API_KEY"), os.getenv("OPENAI_MODEL", "gpt-4o-mini")),
@@ -96,7 +103,10 @@ def provider_configs():
     ]
     available = [item for item in configs if item[1]]
     preferred = os.getenv("LLM_PROVIDER", "").lower()
-    available.sort(key=lambda item: 0 if item[0] == preferred else 1)
+    if preferred:
+        available.sort(key=lambda item: 0 if item[0] == preferred else LLM_PROVIDER_SEQUENCE.index(item[0]) + 1)
+    else:
+        available.sort(key=lambda item: LLM_PROVIDER_SEQUENCE.index(item[0]))
     return available
 
 
@@ -118,11 +128,22 @@ def call_llm(messages, providers=None, config_label="LLM"):
     errors = []
     providers = provider_configs() if providers is None else providers
     if not providers:
-        raise RuntimeError(f"No {config_label} provider is configured. Set one of OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, GROQ_API_KEY, or OPENROUTER_API_KEY in Security Assessor's .env.local, .envlocal, or .env.private, then restart the app.")
+        raise RuntimeError(f"No {config_label} provider is configured. Set ANTHROPIC_AUTH_TOKEN with ANTHROPIC_GATEWAY_BASE_URL, or set one of ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, GROQ_API_KEY, or OPENROUTER_API_KEY in Security Assessor's .env.local, .envlocal, or .env.private, then restart the app.")
     for provider, api_key, model in providers:
         try:
+            if provider == "anthropic_gateway":
+                endpoint = join_url(
+                    first_env_value("ANTHROPIC_GATEWAY_BASE_URL", "ANTHROPIC_BASE_URL"),
+                    "/v1/messages",
+                )
+                data = http_json(
+                    endpoint,
+                    {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}", "anthropic-version": os.getenv("ANTHROPIC_API_VERSION", "2023-06-01")},
+                    {"model": model, "system": messages[0]["content"], "messages": messages[1:], "temperature": 0.2, "max_tokens": 900},
+                )
+                return "\n".join(part.get("text", "") for part in data.get("content", []))
             if provider == "anthropic":
-                endpoint = join_url(os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com"), "/v1/messages")
+                endpoint = join_url(first_env_value("ANTHROPIC_API_BASE_URL", "ANTHROPIC_STANDARD_BASE_URL") or "https://api.anthropic.com", "/v1/messages")
                 data = http_json(
                     endpoint,
                     {"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": os.getenv("ANTHROPIC_API_VERSION", "2023-06-01")},

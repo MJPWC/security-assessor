@@ -631,28 +631,38 @@ def run_quality_llm_review(payload):
                 "role": "system",
                 "content": (
                     "You are a senior code quality reviewer. Review the provided static quality findings and bounded redacted code samples. "
-                    "Act as a decision-support reviewer, not another findings table. "
-                    "Focus on what the result means, what to prioritize, release impact, and where human review is needed. "
-                    "Do not repeat every finding or restate severity counts unless it changes the release decision. "
-                    "Do not provide exact patches, line-by-line code changes, or claim the precise fix is known. "
-                    "Suggest the type of remediation the user should consider, based on the evidence. "
-                    "Do not request secrets or full source code. Return only structured Markdown, not a single paragraph. "
-                    "Use exactly these sections: "
-                    "## Executive Summary, ## Top Priorities, ## Release Impact, ## Recommended Actions, ## Human Review Needed. "
-                    "Under each section, use 2 to 5 short bullet points. Keep each bullet under 25 words."
+                    "Your primary output is an actionable table, not a narrative essay. "
+                    "Return exactly these sections in Markdown, in this order:\n"
+                    "## Executive Summary\n"
+                    "2 to 3 sentences maximum. What this result means overall.\n\n"
+                    "## Action Table\n"
+                    "A Markdown table with these exact columns: "
+                    "Finding | File/Line | Severity | Why It Matters | Suggested Fix Direction | Priority (1-5). "
+                    "Include one row for every distinct finding provided. Do not omit any finding. "
+                    "Priority 1 means fix before release, 5 means safe to defer. "
+                    "Every Suggested Fix Direction cell must name a concrete action "
+                    "(for example: 'move key to environment variable', 'add null check before accessing X', "
+                    "'wrap in try/except and log the error'). "
+                    "Do not use vague language like 'review this area' or 'consider improving this'. "
+                    "Do not provide full code patches, diffs, or exact line-by-line rewrites — one sentence of "
+                    "direction per row is enough.\n\n"
+                    "## Release Impact\n"
+                    "1 to 2 sentences: does this block release, and why or why not.\n\n"
+                    "Do not request secrets or full source code."
                 ),
             },
             {
                 "role": "user",
                 "content": (
-                    "Review this code quality assessment context and provide decision guidance using the required Markdown sections. "
-                    "Do not combine everything into one paragraph. Do not duplicate the findings table.\n\n"
+                    "Review this code quality assessment context and produce the required Action Table covering "
+                    "every finding listed below, plus the Executive Summary and Release Impact sections.\n\n"
                     + json.dumps(safe_payload, indent=2)
                 ),
             },
         ], config_label="Quality LLM"))
     except Exception as exc:
         return "LLM quality review unavailable: " + redact_text(str(exc))
+
 
 
 def load_prompt_file(path, default_severity="info"):
