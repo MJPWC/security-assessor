@@ -311,9 +311,30 @@
       }
       .markdown-body .markdown-table {
         overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        background: #fff;
       }
       .markdown-body table {
         min-width: 760px;
+        border-collapse: collapse;
+      }
+      .markdown-body th,
+      .markdown-body td {
+        border: 1px solid var(--line);
+        padding: 10px 12px;
+      }
+      .markdown-body th {
+        background: #f3f0ec;
+        color: var(--ink);
+        font-weight: 800;
+        white-space: nowrap;
+      }
+      .markdown-body td {
+        background: #fff;
+      }
+      .markdown-body tbody tr:nth-child(even) td {
+        background: #fbfaf8;
       }
       .kv {
         display: grid;
@@ -763,7 +784,13 @@ cannot comply</textarea>
         }
 
         function isTableSeparator(line) {
-          return /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line);
+          return /^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/.test(line);
+        }
+
+        function isLikelyTableRow(line) {
+          if (!line.includes('|')) return false;
+          if (isTableSeparator(line)) return true;
+          return splitTableRow(line).length >= 2;
         }
 
         function splitTableRow(line) {
@@ -774,14 +801,21 @@ cannot comply</textarea>
         }
 
         function renderMarkdownTable(startIndex) {
-          const headers = splitTableRow(lines[startIndex]);
-          const bodyRows = [];
-          let cursor = startIndex + 2;
-          while (cursor < lines.length && lines[cursor].trim().includes('|')) {
-            const row = splitTableRow(lines[cursor]);
-            if (row.length) bodyRows.push(row);
+          const tableRows = [];
+          let cursor = startIndex;
+          while (cursor < lines.length && isLikelyTableRow(lines[cursor].trim())) {
+            const currentLine = lines[cursor].trim();
+            if (!isTableSeparator(currentLine)) {
+              tableRows.push(splitTableRow(currentLine));
+            }
             cursor += 1;
           }
+          if (!tableRows.length) return cursor;
+          const expectedHeaders = ['Finding', 'File/Line', 'Severity', 'Why It Matters', 'Suggested Fix Direction', 'Priority'];
+          const firstRow = tableRows[0];
+          const firstRowLooksLikeHeader = firstRow.some(cell => /finding|severity|priority|file|action|fix/i.test(cell));
+          const headers = firstRowLooksLikeHeader ? firstRow : expectedHeaders.slice(0, Math.max(expectedHeaders.length, firstRow.length));
+          const bodyRows = firstRowLooksLikeHeader ? tableRows.slice(1) : tableRows;
           const headerHtml = headers.map(header => `<th>${escapeHtml(header)}</th>`).join('');
           const rowsHtml = bodyRows.map(row => `
             <tr>${headers.map((_, cellIndex) => `<td>${escapeHtml(row[cellIndex] || '')}</td>`).join('')}</tr>
@@ -798,7 +832,11 @@ cannot comply</textarea>
             index += 1;
             continue;
           }
-          if (line.includes('|') && index + 1 < lines.length && isTableSeparator(lines[index + 1].trim())) {
+          if (isTableSeparator(line)) {
+            index += 1;
+            continue;
+          }
+          if (isLikelyTableRow(line)) {
             closeList();
             index = renderMarkdownTable(index);
             continue;
