@@ -1212,7 +1212,7 @@ cannot comply</textarea>
               </dl>
             </div>
           </section>
-          ${renderReportCard('Security Report Card', payload.reportCard)}
+          <!-- Security Report Card disabled for current development. -->
           <section class="report-card">
             <h2>Findings</h2>
             ${renderTable(['Severity', 'Task', 'Details'], findingRows, 'No findings were reported.')}
@@ -1287,8 +1287,6 @@ cannot comply</textarea>
       function renderQualityReport(payload) {
         const counts = payload.findingCounts || {};
         const metrics = payload.metrics || {};
-        const readiness = metrics.readiness || {};
-        const llmStatus = payload.llmStatus || {};
         const scoreDetails = payload.scoreDetails || {};
         const penalties = scoreDetails.penalties || {};
         const density = payload.findingDensity || {};
@@ -1313,14 +1311,6 @@ cannot comply</textarea>
                 <dt>Run ID</dt><dd>${escapeHtml(payload.runId)}</dd>
                 <dt>Decision</dt><dd>${pill(payload.decision || 'Unknown', String(payload.decision || '').includes('failed') ? 'fail' : String(payload.decision || '').includes('Review') ? 'medium' : 'pass')}</dd>
                 <dt>Quality score</dt><dd>${escapeHtml(payload.score || 0)}/100</dd>
-                <dt>Text files</dt><dd>${escapeHtml(metrics.textFiles || 0)}</dd>
-                <dt>Source files</dt><dd>${escapeHtml(metrics.sourceFiles || 0)}</dd>
-                <dt>Test files</dt><dd>${escapeHtml(metrics.testFiles || 0)}</dd>
-                <dt>Build evidence</dt><dd>${escapeHtml(readiness.buildManifestCount || 0)} manifest(s) · ${escapeHtml(readiness.packagedArtifactCount || 0)} artifact(s)</dd>
-                <dt>Test evidence</dt><dd>${escapeHtml(readiness.ciFileCount || 0)} CI file(s) · ${escapeHtml(readiness.coverageFileCount || 0)} coverage file(s)</dd>
-                <dt>Ops evidence</dt><dd>${escapeHtml(readiness.operationalFileCount || 0)} runtime file(s) · ${escapeHtml(readiness.healthEvidenceCount || 0)} health evidence file(s)</dd>
-                <dt>Release evidence</dt><dd>${escapeHtml(readiness.versionEvidenceCount || 0)} version file(s) · ${escapeHtml(readiness.releaseNoteCount || 0)} release note file(s)</dd>
-                <dt>LLM provider</dt><dd>${escapeHtml(llmStatus.configured ? (llmStatus.providers || []).join(', ') : 'Not configured')}</dd>
                 <dt>Findings</dt><dd>Critical ${counts.critical || 0} · High ${counts.high || 0} · Medium ${counts.medium || 0} · Low ${counts.low || 0}</dd>
                 <dt>Score penalty</dt><dd>${escapeHtml(scoreDetails.penalty || 0)} points: Critical ${penalties.critical || 0}, High ${penalties.high || 0}, Medium ${penalties.medium || 0}, Low ${penalties.low || 0}</dd>
                 <dt>Displayed rows</dt><dd>${escapeHtml(payload.displayFindingTotal || (payload.findings || []).length)} summarized from ${escapeHtml(payload.findingTotal || (payload.findings || []).length)} finding(s)</dd>
@@ -1328,7 +1318,7 @@ cannot comply</textarea>
               </dl>
             </div>
           </section>
-          ${renderReportCard('Quality Report Card', payload.reportCard)}
+          <!-- Quality Report Card disabled for current development. -->
           <section class="report-card">
             <h2>LLM Quality Review</h2>
             <div class="card-body">${renderMarkdown(payload.llmReview || 'LLM review was not requested or no provider was configured.')}</div>

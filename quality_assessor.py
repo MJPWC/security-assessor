@@ -437,14 +437,6 @@ def build_markdown_report(result):
         "",
         f"- File: {result['artifact']['fileName']}",
         f"- Type: {result['artifact']['type']}",
-        f"- Text files scanned: {result['metrics']['textFiles']}",
-        f"- Source files scanned: {result['metrics']['sourceFiles']}",
-        f"- Test files detected: {result['metrics']['testFiles']}",
-        f"- Build manifests/artifacts detected: {readiness.get('buildManifestCount', 0)} / {readiness.get('packagedArtifactCount', 0)}",
-        f"- CI files detected: {readiness.get('ciFileCount', 0)}",
-        f"- Operational metadata files detected: {readiness.get('operationalFileCount', 0)}",
-        f"- Health check evidence files: {readiness.get('healthEvidenceCount', 0)}",
-        f"- Version metadata files: {readiness.get('versionEvidenceCount', 0)}",
         f"- Raw findings: {finding_total}",
         f"- Displayed finding rows: {result.get('displayFindingTotal', len(result.get('findings') or []))}",
         f"- Findings per text file: {findings_per_text_file}",
@@ -461,14 +453,17 @@ def build_markdown_report(result):
         lines.append(f"| {severity} | {result['findingCounts'].get(severity, 0)} | {penalties.get(severity, 0)} |")
     lines.extend([
         f"| total | {finding_total} | {score_details.get('penalty', 0)} |",
-        "",
-        "## Quality Report Card",
-        "",
-        "| Area | Score | Status | Evidence Basis |",
-        "| --- | ---: | --- | --- |",
     ])
-    for card in result.get("reportCard") or []:
-        lines.append(f"| {card.get('area', '')} | {card.get('score', 0)} | {card.get('status', '')} | {card.get('detail', '')} |")
+    # Quality Report Card export disabled for current development.
+    # lines.extend([
+    #     "",
+    #     "## Quality Report Card",
+    #     "",
+    #     "| Area | Score | Status | Evidence Basis |",
+    #     "| --- | ---: | --- | --- |",
+    # ])
+    # for card in result.get("reportCard") or []:
+    #     lines.append(f"| {card.get('area', '')} | {card.get('score', 0)} | {card.get('status', '')} | {card.get('detail', '')} |")
     lines.extend([
         "",
         "## LLM Quality Review",
@@ -632,17 +627,6 @@ def build_xlsx_report(result):
         ["Type", result["artifact"]["type"]],
         ["Size bytes", result["artifact"]["sizeBytes"]],
         ["SHA-256", result["artifact"]["sha256"]],
-        ["Text files scanned", result["metrics"]["textFiles"]],
-        ["Source files scanned", result["metrics"]["sourceFiles"]],
-        ["Test files detected", result["metrics"]["testFiles"]],
-        ["Build manifests detected", readiness.get("buildManifestCount", 0)],
-        ["Packaged artifacts detected", readiness.get("packagedArtifactCount", 0)],
-        ["CI files detected", readiness.get("ciFileCount", 0)],
-        ["Coverage files detected", readiness.get("coverageFileCount", 0)],
-        ["Operational metadata files detected", readiness.get("operationalFileCount", 0)],
-        ["Health evidence files", readiness.get("healthEvidenceCount", 0)],
-        ["Version metadata files", readiness.get("versionEvidenceCount", 0)],
-        ["Release note files", readiness.get("releaseNoteCount", 0)],
         ["Raw findings", result.get("findingTotal", len(result.get("findings") or []))],
         ["Displayed finding rows", result.get("displayFindingTotal", len(result.get("findings") or []))],
         ["Findings per text file", density.get("perTextFile", 0)],
@@ -661,7 +645,8 @@ def build_xlsx_report(result):
     ]
     sheets = [
         ("Summary", summary_rows, [28, 90]),
-        ("Report Card", report_card_rows(result.get("reportCard") or []), [30, 12, 20, 90]),
+        # Quality Report Card export disabled for current development.
+        # ("Report Card", report_card_rows(result.get("reportCard") or []), [30, 12, 20, 90]),
         ("Findings", quality_finding_rows(result["findings"]), [14, 10, 22, 34, 48, 10, 80]),
         ("Occurrences", quality_occurrence_rows(result["findings"]), [14, 22, 34, 60, 10, 80]),
         ("LLM Review", llm_rows, [22, 120]),

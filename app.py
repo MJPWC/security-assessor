@@ -1560,15 +1560,16 @@ def build_markdown_report(assessment):
     ]
     for severity in ["critical", "high", "medium", "low", "info"]:
         lines.append(f"| {severity} | {assessment['findingCounts'].get(severity, 0)} |")
-    lines.extend([
-        "",
-        "## Security Report Card",
-        "",
-        "| Area | Score | Status | Evidence Basis |",
-        "| --- | ---: | --- | --- |",
-    ])
-    for card in assessment.get("reportCard") or []:
-        lines.append(f"| {card.get('area', '')} | {card.get('score', 0)} | {card.get('status', '')} | {card.get('detail', '')} |")
+    # Security Report Card export disabled for current development.
+    # lines.extend([
+    #     "",
+    #     "## Security Report Card",
+    #     "",
+    #     "| Area | Score | Status | Evidence Basis |",
+    #     "| --- | ---: | --- | --- |",
+    # ])
+    # for card in assessment.get("reportCard") or []:
+    #     lines.append(f"| {card.get('area', '')} | {card.get('score', 0)} | {card.get('status', '')} | {card.get('detail', '')} |")
     for severity in ["critical", "high", "medium", "low", "info"]:
         items = [item for item in assessment["findings"] if item["severity"] == severity]
         if not items:
@@ -1855,7 +1856,8 @@ def build_xlsx_report(assessment):
     ])
     sheets = [
         ("Summary", summary_rows, [32, 90]),
-        ("Report Card", report_card_rows(assessment.get("reportCard") or []), [30, 12, 20, 90]),
+        # Security Report Card export disabled for current development.
+        # ("Report Card", report_card_rows(assessment.get("reportCard") or []), [30, 12, 20, 90]),
         ("Findings", finding_rows(assessment["findings"]), [16, 28, 80, 80]),
         ("Certificates", certificate_rows(assessment.get("certificateScan") or {}), [16, 42, 18, 12, 50, 50, 24, 60]),
         ("Components", component_rows(assessment["components"]), [24, 42, 22, 48]),
