@@ -95,6 +95,40 @@ def sorted_security_findings(findings):
     )
 
 
+def group_security_findings(findings):
+    grouped = {}
+    order = []
+    for item in findings:
+        key = (item.get("severity", ""), item.get("task", ""), item.get("details", ""))
+        evidence = item.get("evidence") or {}
+        if key not in grouped:
+            grouped[key] = {
+                **item,
+                "count": 0,
+                "occurrences": [],
+                "_occurrenceKeys": set(),
+            }
+            order.append(key)
+        occurrence_key = json.dumps(evidence, sort_keys=True, default=str)
+        if occurrence_key in grouped[key]["_occurrenceKeys"]:
+            continue
+        grouped[key]["_occurrenceKeys"].add(occurrence_key)
+        grouped[key]["occurrences"].append(evidence)
+        grouped[key]["count"] += 1
+
+    results = []
+    for key in order:
+        item = grouped[key]
+        item.pop("_occurrenceKeys", None)
+        if item["count"] <= 1:
+            item.pop("occurrences", None)
+            item.pop("count", None)
+        else:
+            item["evidence"] = {"occurrences": item["occurrences"][:50]}
+        results.append(item)
+    return results
+
+
 def safe_name(file_name):
     return re.sub(r"[^A-Za-z0-9._-]", "_", Path(file_name).name or "uploaded-artifact")
 
@@ -1576,7 +1610,11 @@ def build_markdown_report(assessment):
             continue
         lines.extend(["", f"## {severity.title()} Findings", ""])
         for item in items:
-            lines.append(f"- {item['task']}: {item['details']}")
+            count = item.get("count") or 1
+            prefix = f"{item['task']}"
+            if count > 1:
+                prefix = f"{prefix} ({count} occurrences)"
+            lines.append(f"- {prefix}: {item['details']}")
             if item["evidence"]:
                 lines.append(f"  Evidence: `{json.dumps(item['evidence'])}`")
     lines.extend([
@@ -1718,10 +1756,11 @@ def style_header(values):
 
 
 def finding_rows(findings):
-    rows = [style_header(["Severity", "Task", "Details", "Evidence"])]
+    rows = [style_header(["Severity", "Count", "Task", "Details", "Evidence"])]
     for item in findings:
         rows.append([
             item.get("severity", ""),
+            item.get("count") or 1,
             item.get("task", ""),
             item.get("details", ""),
             json.dumps(item.get("evidence", {})),
@@ -1858,7 +1897,7 @@ def build_xlsx_report(assessment):
         ("Summary", summary_rows, [32, 90]),
         # Security Report Card export disabled for current development.
         # ("Report Card", report_card_rows(assessment.get("reportCard") or []), [30, 12, 20, 90]),
-        ("Findings", finding_rows(assessment["findings"]), [16, 28, 80, 80]),
+        ("Findings", finding_rows(assessment["findings"]), [16, 10, 28, 80, 80]),
         ("Certificates", certificate_rows(assessment.get("certificateScan") or {}), [16, 42, 18, 12, 50, 50, 24, 60]),
         ("Components", component_rows(assessment["components"]), [24, 42, 22, 48]),
         ("Security Readiness", security_readiness_rows(assessment), [28, 42, 90]),
@@ -1968,10 +2007,11 @@ def assess_artifact(file_name, content_base64):
     configuration_security = scan_configuration_security(files, extract_dir, findings)
     npm_audit = run_npm_audit_if_possible(extract_dir, findings)
     pip_audit = run_pip_audit_if_possible(extract_dir, findings)
-    findings = sorted_security_findings(findings)
+    raw_finding_total = len(findings)
+    findings = sorted_security_findings(group_security_findings(findings))
     finding_counts = {}
     for item in findings:
-        finding_counts[item["severity"]] = finding_counts.get(item["severity"], 0) + 1
+        finding_counts[item["severity"]] = finding_counts.get(item["severity"], 0) + (item.get("count") or 1)
     assessment = {
         "runId": run_id,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
@@ -1987,6 +2027,8 @@ def assess_artifact(file_name, content_base64):
         "components": components,
         "findings": findings,
         "findingCounts": finding_counts,
+        "findingTotal": raw_finding_total,
+        "displayFindingTotal": len(findings),
         "decision": decision_for(findings),
     }
     assessment["sbom"] = create_sbom(artifact, components)
@@ -2069,6 +2111,8 @@ class Handler(SimpleHTTPRequestHandler):
                 "runId": result["runId"],
                 "decision": result["decision"],
                 "findingCounts": result["findingCounts"],
+                "findingTotal": result["findingTotal"],
+                "displayFindingTotal": result["displayFindingTotal"],
                 "findings": result["findings"],
                 "components": result["components"][:150],
                 "componentCount": len(result["components"]),

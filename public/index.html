@@ -1166,6 +1166,7 @@ cannot comply</textarea>
         const findingRows = findings.map(item => `
           <tr>
             <td>${pill(item.severity, item.severity)}</td>
+            <td>${escapeHtml(item.count || 1)}</td>
             <td>${escapeHtml(item.task)}</td>
             <td>${escapeHtml(item.details)}</td>
           </tr>`);
@@ -1208,6 +1209,7 @@ cannot comply</textarea>
                 <dt>Decision</dt><dd>${pill(payload.decision || 'Unknown')}</dd>
                 <dt>Components</dt><dd>${escapeHtml(payload.componentCount || 0)}</dd>
                 <dt>Findings</dt><dd>Critical ${counts.critical || 0} · High ${counts.high || 0} · Medium ${counts.medium || 0} · Low ${counts.low || 0}</dd>
+                <dt>Displayed rows</dt><dd>${escapeHtml(payload.displayFindingTotal || findings.length)} summarized from ${escapeHtml(payload.findingTotal || findings.length)} finding(s)</dd>
                 <dt>Certificates</dt><dd>${certificateFiles.length}</dd>
               </dl>
             </div>
@@ -1215,7 +1217,7 @@ cannot comply</textarea>
           <!-- Security Report Card disabled for current development. -->
           <section class="report-card">
             <h2>Findings</h2>
-            ${renderTable(['Severity', 'Task', 'Details'], findingRows, 'No findings were reported.')}
+            ${renderTable(['Severity', 'Count', 'Task', 'Details'], findingRows, 'No findings were reported.')}
           </section>
           <section class="report-card">
             <h2>Certificate and TLS Security</h2>
