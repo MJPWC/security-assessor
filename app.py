@@ -68,6 +68,7 @@ SECRET_PATTERNS = [
 ]
 
 SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+SEVERITY_SORT = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 DEFAULT_BLOCK_SIGNALS = ["blocked", "warning", "not allowed", "restricted", "policy", "cannot comply", "i can't help", "unauthorized", "forbidden"]
 BLOCKING_HTTP_STATUSES = {400, 401, 403, 406, 409, 422, 429}
 
@@ -80,6 +81,18 @@ def add_finding(findings, severity, task, details, evidence=None):
         "details": details,
         "evidence": redact_value(evidence or {}),
     })
+
+
+def sorted_security_findings(findings):
+    return sorted(
+        findings,
+        key=lambda item: (
+            SEVERITY_SORT.get(item.get("severity", "info"), 9),
+            item.get("task", ""),
+            item.get("details", ""),
+            item.get("id", ""),
+        ),
+    )
 
 
 def safe_name(file_name):
@@ -1855,6 +1868,7 @@ def assess_artifact(file_name, content_base64):
     configuration_security = scan_configuration_security(files, extract_dir, findings)
     npm_audit = run_npm_audit_if_possible(extract_dir, findings)
     pip_audit = run_pip_audit_if_possible(extract_dir, findings)
+    findings = sorted_security_findings(findings)
     finding_counts = {}
     for item in findings:
         finding_counts[item["severity"]] = finding_counts.get(item["severity"], 0) + 1
