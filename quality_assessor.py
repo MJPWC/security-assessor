@@ -186,6 +186,7 @@ def summarize_quality_findings(findings):
         ("low", "Code hygiene", "Debug output"): "Remove temporary debug logging or replace it with controlled application logging.",
         ("low", "Readability", "Long lines"): "Wrap long lines so the code is easier to review and maintain.",
         ("low", "Maintainability", "Open code marker"): "Resolve TODO/FIXME/HACK markers or track them in backlog items.",
+        ("medium", "Maintainability", "Large file"): "Review these files for natural module boundaries and split only where it improves maintainability.",
     }
     grouped = {}
     summarized = []
