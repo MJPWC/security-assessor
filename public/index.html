@@ -711,6 +711,11 @@ cannot comply</textarea>
       const qualityLocationClose = document.getElementById('quality-location-close');
       const guardrailButton = document.getElementById('guardrail-scan');
       let latestQualityFindings = [];
+      let activeMode = 'security';
+      const tabState = {
+        security: null,
+        quality: null
+      };
       const guardrailFields = {
         targetUrl: document.getElementById('target-url'),
         endpoint: document.getElementById('guardrail-endpoint'),
@@ -737,14 +742,85 @@ cannot comply</textarea>
         useLlmReview: document.getElementById('quality-llm-review')
       };
 
+      function emptyReportText(mode) {
+        return mode === 'quality'
+          ? 'Quality report will appear here after the scan completes.'
+          : 'Security report will appear here after the scan completes.';
+      }
+
+      function restoreSecurityState() {
+        const state = tabState.security;
+        if (!state) {
+          setDecision('No assessment yet');
+          renderLinks();
+          renderGuardrailLinks();
+          reportEl.innerHTML = `<div class="report-empty">${emptyReportText('security')}</div>`;
+          return;
+        }
+        setDecision(state.payload.decision);
+        if (state.kind === 'guardrail') {
+          renderLinks();
+          renderGuardrailReport(state.payload);
+          renderGuardrailLinks(state.payload.runId);
+          return;
+        }
+        renderGuardrailLinks();
+        for (const key of Object.keys(counters)) {
+          counters[key].textContent = state.payload.findingCounts?.[key] || 0;
+        }
+        renderReport(state.payload);
+        renderLinks(state.payload.runId);
+      }
+
+      function restoreQualityState() {
+        const payload = tabState.quality;
+        if (!payload) {
+          setDecision('No assessment yet');
+          renderQualityLinks();
+          reportEl.innerHTML = `<div class="report-empty">${emptyReportText('quality')}</div>`;
+          return;
+        }
+        setDecision(payload.decision);
+        qualityCounters.score.textContent = payload.score || 0;
+        qualityCounters.high.textContent = payload.findingCounts?.high || 0;
+        qualityCounters.medium.textContent = payload.findingCounts?.medium || 0;
+        qualityCounters.low.textContent = payload.findingCounts?.low || 0;
+        renderQualityReport(payload);
+        renderQualityLinks(payload.runId);
+      }
+
+      function restoreActiveReport() {
+        if (activeMode === 'quality') {
+          restoreQualityState();
+        } else {
+          restoreSecurityState();
+        }
+      }
+
       function setMode(mode) {
+        activeMode = mode;
         const qualityMode = mode === 'quality';
         securityControls.classList.toggle('is-hidden', qualityMode);
         qualityControls.classList.toggle('is-hidden', !qualityMode);
         securityModeButton.classList.toggle('active', !qualityMode);
         qualityModeButton.classList.toggle('active', qualityMode);
+        restoreActiveReport();
+      }
+
+      function resetCachedReports() {
+        tabState.security = null;
+        tabState.quality = null;
+        latestQualityFindings = [];
         setDecision('No assessment yet');
-        reportEl.innerHTML = `<div class="report-empty">${qualityMode ? 'Quality report will appear here after the scan completes.' : 'Security report will appear here after the scan completes.'}</div>`;
+        renderLinks();
+        renderGuardrailLinks();
+        renderQualityLinks();
+        Object.values(counters).forEach(el => { el.textContent = '0'; });
+        qualityCounters.score.textContent = '0';
+        qualityCounters.high.textContent = '0';
+        qualityCounters.medium.textContent = '0';
+        qualityCounters.low.textContent = '0';
+        reportEl.innerHTML = `<div class="report-empty">${emptyReportText(activeMode)}</div>`;
       }
 
       function setStatus(message) {
@@ -1187,6 +1263,7 @@ cannot comply</textarea>
 
       securityModeButton.addEventListener('click', () => setMode('security'));
       qualityModeButton.addEventListener('click', () => setMode('quality'));
+      fileInput.addEventListener('change', resetCachedReports);
       reportEl.addEventListener('click', event => {
         const button = event.target.closest('[data-quality-location-index]');
         if (!button) return;
@@ -1226,8 +1303,10 @@ cannot comply</textarea>
           for (const key of Object.keys(counters)) {
             counters[key].textContent = payload.findingCounts?.[key] || 0;
           }
+          tabState.security = { kind: 'assessment', payload };
           renderReport(payload);
           renderLinks(payload.runId);
+          renderGuardrailLinks();
           setStatus(`Completed run ${payload.runId}. Components found: ${payload.componentCount}.`);
         } catch (error) {
           setDecision('Failed');
@@ -1283,8 +1362,10 @@ cannot comply</textarea>
           const payload = await response.json();
           if (!response.ok) throw new Error(payload.error || 'Prompt guardrail test failed.');
           setDecision(payload.decision);
+          tabState.security = { kind: 'guardrail', payload };
           renderGuardrailReport(payload);
           renderGuardrailLinks(payload.runId);
+          renderLinks();
           setStatus(`Completed prompt guardrail run ${payload.runId}. Failed prompts: ${payload.summary?.failed || 0}.`);
         } catch (error) {
           setDecision('Failed');
@@ -1328,6 +1409,7 @@ cannot comply</textarea>
           qualityCounters.high.textContent = payload.findingCounts?.high || 0;
           qualityCounters.medium.textContent = payload.findingCounts?.medium || 0;
           qualityCounters.low.textContent = payload.findingCounts?.low || 0;
+          tabState.quality = payload;
           renderQualityReport(payload);
           renderQualityLinks(payload.runId);
           qualityStatusEl.textContent = `Completed quality run ${payload.runId}. Score: ${payload.score || 0}/100.`;
