@@ -95,7 +95,7 @@ def provider_configs():
             gateway_token if gateway_base_url else "",
             os.getenv("ANTHROPIC_GATEWAY_MODEL") or os.getenv("ANTHROPIC_MODEL", "claude-3-7-sonnet-20250219"),
         ),
-        ("anthropic", first_env_value("ANTHROPIC_API_KEY"), os.getenv("ANTHROPIC_MODEL", "claude-3-7-sonnet-20250219")),
+        ("anthropic", first_env_value("ANTHROPIC_API_KEY", "ANTHROPIC_STANDARD_API_KEY", "ANTHROPIC_FALLBACK_API_KEY"), os.getenv("ANTHROPIC_MODEL", "claude-3-7-sonnet-20250219")),
         ("groq", first_env_value("GROQ_API_KEY"), os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")),
         ("openai", first_env_value("OPENAI_API_KEY"), os.getenv("OPENAI_MODEL", "gpt-4o-mini")),
         ("gemini", first_env_value("GEMINI_API_KEY", "GEMINI_API_KEY_1", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3", "GEMINI_API_KEY_4"), os.getenv("GEMINI_MODEL", "gemini-2.0-flash")),
@@ -104,7 +104,7 @@ def provider_configs():
     available = [item for item in configs if item[1]]
     preferred = os.getenv("LLM_PROVIDER", "").lower()
     if preferred:
-        available.sort(key=lambda item: 0 if item[0] == preferred else LLM_PROVIDER_SEQUENCE.index(item[0]) + 1)
+        available.sort(key=lambda item: 0 if item[0] == preferred else LLM_PROVIDER_SEQUENCE.index(item[0]) + 1 if item[0] in LLM_PROVIDER_SEQUENCE else 99)
     else:
         available.sort(key=lambda item: LLM_PROVIDER_SEQUENCE.index(item[0]))
     return available
@@ -124,6 +124,44 @@ def http_json(url, headers, body):
         raise RuntimeError(f"HTTP {exc.code}: {redact_text(error_body or exc.reason)}") from exc
 
 
+def raise_for_provider_error(provider, data):
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{provider} returned a non-object JSON response.")
+    error = data.get("error")
+    if error:
+        if isinstance(error, dict):
+            message = error.get("message") or error.get("detail") or json.dumps(redact_value(error))
+        else:
+            message = str(error)
+        raise RuntimeError(f"{provider} returned an error: {redact_text(message)}")
+
+
+def anthropic_response_text(provider, data):
+    raise_for_provider_error(provider, data)
+    parts = data.get("content") or []
+    text = "\n".join(part.get("text", "") for part in parts if isinstance(part, dict)).strip()
+    if not text:
+        raise RuntimeError(f"{provider} returned no text content.")
+    return text
+
+
+def gemini_response_text(provider, data):
+    raise_for_provider_error(provider, data)
+    parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+    text = "\n".join(part.get("text", "") for part in parts if isinstance(part, dict)).strip()
+    if not text:
+        raise RuntimeError(f"{provider} returned no text content.")
+    return text
+
+
+def chat_response_text(provider, data):
+    raise_for_provider_error(provider, data)
+    text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    if not str(text).strip():
+        raise RuntimeError(f"{provider} returned no text content.")
+    return text
+
+
 def call_llm(messages, providers=None, config_label="LLM"):
     errors = []
     providers = provider_configs() if providers is None else providers
@@ -141,7 +179,7 @@ def call_llm(messages, providers=None, config_label="LLM"):
                     {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}", "anthropic-version": os.getenv("ANTHROPIC_API_VERSION", "2023-06-01")},
                     {"model": model, "system": messages[0]["content"], "messages": messages[1:], "temperature": 0.2, "max_tokens": 900},
                 )
-                return "\n".join(part.get("text", "") for part in data.get("content", []))
+                return anthropic_response_text(provider, data)
             if provider == "anthropic":
                 endpoint = join_url(first_env_value("ANTHROPIC_API_BASE_URL", "ANTHROPIC_STANDARD_BASE_URL") or "https://api.anthropic.com", "/v1/messages")
                 data = http_json(
@@ -149,7 +187,7 @@ def call_llm(messages, providers=None, config_label="LLM"):
                     {"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": os.getenv("ANTHROPIC_API_VERSION", "2023-06-01")},
                     {"model": model, "system": messages[0]["content"], "messages": messages[1:], "temperature": 0.2, "max_tokens": 900},
                 )
-                return "\n".join(part.get("text", "") for part in data.get("content", []))
+                return anthropic_response_text(provider, data)
             if provider == "gemini":
                 base_url = os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com")
                 data = http_json(
@@ -157,7 +195,7 @@ def call_llm(messages, providers=None, config_label="LLM"):
                     {"Content-Type": "application/json"},
                     {"contents": [{"role": "user", "parts": [{"text": "\n\n".join(message["content"] for message in messages)}]}], "generationConfig": {"temperature": 0.2, "maxOutputTokens": 900}},
                 )
-                return "\n".join(part.get("text", "") for part in data.get("candidates", [{}])[0].get("content", {}).get("parts", []))
+                return gemini_response_text(provider, data)
             endpoint = join_url(os.getenv("OPENAI_BASE_URL", "https://api.openai.com"), "/v1/chat/completions")
             headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
             if provider == "groq":
@@ -165,7 +203,7 @@ def call_llm(messages, providers=None, config_label="LLM"):
             if provider == "openrouter":
                 endpoint = join_url(os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"), "/chat/completions")
             data = http_json(endpoint, headers, {"model": model, "messages": messages, "temperature": 0.2, "max_tokens": 900})
-            return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            return chat_response_text(provider, data)
         except Exception as exc:
             errors.append(f"{provider}: {redact_text(str(exc))}")
     raise RuntimeError("LLM request failed for all configured providers. " + " | ".join(errors))
