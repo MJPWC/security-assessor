@@ -89,25 +89,29 @@ def first_env_value(*names):
 def provider_configs():
     gateway_token = first_env_value("ANTHROPIC_GATEWAY_AUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN")
     gateway_base_url = first_env_value("ANTHROPIC_GATEWAY_BASE_URL", "ANTHROPIC_BASE_URL")
-    configs = [
-        (
-            "anthropic_gateway",
+    configs = {
+        "anthropic_gateway": (
             gateway_token if gateway_base_url else "",
             os.getenv("ANTHROPIC_GATEWAY_MODEL") or os.getenv("ANTHROPIC_MODEL", "claude-3-7-sonnet-20250219"),
         ),
-        ("anthropic", first_env_value("ANTHROPIC_API_KEY", "ANTHROPIC_STANDARD_API_KEY", "ANTHROPIC_FALLBACK_API_KEY"), os.getenv("ANTHROPIC_MODEL", "claude-3-7-sonnet-20250219")),
-        ("groq", first_env_value("GROQ_API_KEY"), os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")),
-        ("openai", first_env_value("OPENAI_API_KEY"), os.getenv("OPENAI_MODEL", "gpt-4o-mini")),
-        ("gemini", first_env_value("GEMINI_API_KEY", "GEMINI_API_KEY_1", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3", "GEMINI_API_KEY_4"), os.getenv("GEMINI_MODEL", "gemini-2.0-flash")),
-        ("openrouter", first_env_value("OPENROUTER_API_KEY"), os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.1-8b-instruct")),
-    ]
-    available = [item for item in configs if item[1]]
-    preferred = os.getenv("LLM_PROVIDER", "").lower()
-    if preferred:
-        available.sort(key=lambda item: 0 if item[0] == preferred else LLM_PROVIDER_SEQUENCE.index(item[0]) + 1 if item[0] in LLM_PROVIDER_SEQUENCE else 99)
-    else:
-        available.sort(key=lambda item: LLM_PROVIDER_SEQUENCE.index(item[0]))
-    return available
+        "anthropic": (
+            first_env_value("ANTHROPIC_API_KEY", "ANTHROPIC_STANDARD_API_KEY", "ANTHROPIC_FALLBACK_API_KEY"),
+            os.getenv("ANTHROPIC_MODEL", "claude-3-7-sonnet-20250219"),
+        ),
+        "groq": (first_env_value("GROQ_API_KEY"), os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")),
+        "openai": (first_env_value("OPENAI_API_KEY"), os.getenv("OPENAI_MODEL", "gpt-4o-mini")),
+        "gemini": (
+            first_env_value("GEMINI_API_KEY", "GEMINI_API_KEY_1", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3", "GEMINI_API_KEY_4"),
+            os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
+        ),
+        "openrouter": (first_env_value("OPENROUTER_API_KEY"), os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.1-8b-instruct")),
+    }
+    providers = []
+    for provider in LLM_PROVIDER_SEQUENCE:
+        api_key, model = configs.get(provider, ("", ""))
+        if api_key:
+            providers.append((provider, api_key, model))
+    return providers
 
 
 def join_url(base_url, path):

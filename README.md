@@ -32,9 +32,7 @@ Security and quality use the same local LLM client in `llm_client.py`. It loads 
 Put real keys in `.env.local`, `.envlocal`, or `.env.private`:
 
 ```env
-LLM_PROVIDER=anthropic_gateway
-
-# Gateway Anthropic is tried first.
+# Gateway Anthropic is tried first when configured.
 ANTHROPIC_AUTH_TOKEN=your_gateway_token_here
 ANTHROPIC_GATEWAY_BASE_URL=https://your-gateway.example.com
 ANTHROPIC_GATEWAY_MODEL=claude-3-7-sonnet-20250219
@@ -44,6 +42,8 @@ ANTHROPIC_API_KEY=your_standard_anthropic_key_here
 ANTHROPIC_API_BASE_URL=https://api.anthropic.com
 ANTHROPIC_MODEL=claude-3-7-sonnet-20250219
 ```
+
+Configured providers are tried dynamically in this order: `anthropic_gateway`, `anthropic`, `groq`, `openai`, `gemini`, `openrouter`.
 
 The committed `.env` is a template. Local override files are ignored by Git.
 

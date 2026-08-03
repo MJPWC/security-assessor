@@ -925,7 +925,16 @@ def run_quality_llm_review(payload):
             },
         ], config_label="Quality LLM"))
     except Exception as exc:
-        return "LLM quality review unavailable: " + redact_text(str(exc))
+        status = llm_status()
+        providers = status.get("providers") or []
+        fallback_hint = ""
+        if providers == ["anthropic_gateway"]:
+            fallback_hint = (
+                "\n\nFallback was not attempted because no fallback LLM provider is configured. "
+                "Set ANTHROPIC_API_KEY, ANTHROPIC_STANDARD_API_KEY, or ANTHROPIC_FALLBACK_API_KEY "
+                "to enable automatic fallback to standard Anthropic."
+            )
+        return "LLM quality review unavailable: " + redact_text(str(exc)) + fallback_hint
 
 
 def combined_deployment_verdict(security_payload, quality_payload):
