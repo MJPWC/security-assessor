@@ -645,6 +645,19 @@
             <div class="hint">Keep {{prompt}} in this template. If no prompt file is uploaded, built-in restricted and allowed prompts are used.</div>
           </div>
           <div class="field-full">
+            <label for="guardrail-target-file">Target endpoint file</label>
+            <input id="guardrail-target-file" type="file">
+            <div class="hint">Optional. Use this for multipart endpoints that require a file upload, such as /api/execute-upload.</div>
+          </div>
+          <div>
+            <label for="guardrail-file-field">Multipart file field</label>
+            <input id="guardrail-file-field" type="text" value="file">
+          </div>
+          <div>
+            <label for="guardrail-prompt-field">Multipart prompt field</label>
+            <input id="guardrail-prompt-field" type="text" value="userInstruction">
+          </div>
+          <div class="field-full">
             <label for="prompt-file">Prompt file</label>
             <input id="prompt-file" type="file" accept=".txt,.csv,.json">
             <div class="hint">Optional. TXT uses one prompt per line. CSV/JSON can include prompt, expected, severity, and name.</div>
@@ -749,6 +762,9 @@ cannot comply</textarea>
         endpoint: document.getElementById('guardrail-endpoint'),
         method: document.getElementById('guardrail-method'),
         bodyTemplate: document.getElementById('guardrail-body'),
+        targetFile: document.getElementById('guardrail-target-file'),
+        fileField: document.getElementById('guardrail-file-field'),
+        promptField: document.getElementById('guardrail-prompt-field'),
         promptFile: document.getElementById('prompt-file'),
         executeAllowedPrompts: document.getElementById('execute-allowed-prompts'),
         rateLimitDelayMs: document.getElementById('rate-limit-delay'),
@@ -1419,6 +1435,14 @@ cannot comply</textarea>
             promptFileName = promptFile.name;
             promptFileContentBase64 = arrayBufferToBase64(await promptFile.arrayBuffer());
           }
+          const targetFile = guardrailFields.targetFile.files && guardrailFields.targetFile.files[0];
+          let targetFileName = '';
+          let targetFileContentBase64 = '';
+          if (targetFile) {
+            setStatus(`Reading target endpoint file ${targetFile.name}...`);
+            targetFileName = targetFile.name;
+            targetFileContentBase64 = arrayBufferToBase64(await targetFile.arrayBuffer());
+          }
           setStatus(guardrailFields.executeAllowedPrompts.checked
             ? 'Sending restricted and allowed prompts to running app...'
             : 'Sending restricted prompts only. Allowed prompts will be skipped.');
@@ -1430,6 +1454,10 @@ cannot comply</textarea>
               endpoint: guardrailFields.endpoint.value.trim(),
               method: guardrailFields.method.value,
               bodyTemplate: guardrailFields.bodyTemplate.value,
+              targetFileName,
+              targetFileContentBase64,
+              multipartFileField: guardrailFields.fileField.value.trim(),
+              multipartPromptField: guardrailFields.promptField.value.trim(),
               promptFileName,
               promptFileContentBase64,
               executeAllowedPrompts: guardrailFields.executeAllowedPrompts.checked,

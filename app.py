@@ -1198,6 +1198,46 @@ def request_body_from_template(template, prompt):
         return text.replace("{{prompt}}", prompt).encode("utf-8")
 
 
+def multipart_fields_from_template(template, prompt, prompt_field):
+    text = str(template or "").strip()
+    fields = {}
+    if text:
+        try:
+            parsed = replace_prompt_value(json.loads(text), prompt)
+            if isinstance(parsed, dict):
+                for key, value in parsed.items():
+                    if value is None:
+                        continue
+                    fields[str(key)] = value if isinstance(value, str) else json.dumps(value)
+        except json.JSONDecodeError:
+            pass
+    if prompt_field:
+        fields[prompt_field] = prompt
+    return fields
+
+
+def multipart_body(fields, file_field, file_name, file_bytes):
+    boundary = "----security-assessor-" + uuid.uuid4().hex
+    chunks = []
+    for key, value in fields.items():
+        chunks.extend([
+            f"--{boundary}\r\n".encode("utf-8"),
+            f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode("utf-8"),
+            str(value).encode("utf-8"),
+            b"\r\n",
+        ])
+    safe_file_name = safe_name(file_name or "upload.bin")
+    chunks.extend([
+        f"--{boundary}\r\n".encode("utf-8"),
+        f'Content-Disposition: form-data; name="{file_field}"; filename="{safe_file_name}"\r\n'.encode("utf-8"),
+        b"Content-Type: application/octet-stream\r\n\r\n",
+        file_bytes,
+        b"\r\n",
+        f"--{boundary}--\r\n".encode("utf-8"),
+    ])
+    return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
+
+
 def evaluate_guardrail_block(response, expected_signals):
     status = response.get("status")
     body = str(response.get("body") or "").lower()
@@ -1226,7 +1266,18 @@ def send_guardrail_prompt(config, prompt):
     headers = {"Content-Type": "application/json", **config["headers"]}
     url = config["targetUrl"].rstrip("/") + config["endpoint"]
     if method != "GET":
-        data = request_body_from_template(config["bodyTemplate"], prompt)
+        if config.get("targetFileBytes"):
+            fields = multipart_fields_from_template(config["bodyTemplate"], prompt, config.get("multipartPromptField") or "userInstruction")
+            data, content_type = multipart_body(
+                fields,
+                config.get("multipartFileField") or "file",
+                config.get("targetFileName") or "upload.bin",
+                config["targetFileBytes"],
+            )
+            headers = {key: value for key, value in config["headers"].items() if key.lower() != "content-type"}
+            headers["Content-Type"] = content_type
+        else:
+            data = request_body_from_template(config["bodyTemplate"], prompt)
     attempts = config["rateLimitRetries"] + 1
     for attempt in range(attempts):
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
@@ -1487,6 +1538,14 @@ def run_guardrail_test(payload):
         "rateLimitDelaySeconds": max(0.0, min(60.0, int(payload.get("rateLimitDelayMs") or 1000) / 1000.0)),
         "rateLimitRetries": max(0, min(10, int(payload.get("rateLimitRetries") or 2))),
     }
+    if payload.get("targetFileContentBase64"):
+        target_file_bytes = base64.b64decode(payload.get("targetFileContentBase64"))
+        if len(target_file_bytes) > MAX_UPLOAD_BYTES:
+            raise ValueError(f"Target endpoint file exceeds {MAX_UPLOAD_BYTES} bytes.")
+        config["targetFileBytes"] = target_file_bytes
+        config["targetFileName"] = payload.get("targetFileName") or "upload.bin"
+        config["multipartFileField"] = str(payload.get("multipartFileField") or "file").strip() or "file"
+        config["multipartPromptField"] = str(payload.get("multipartPromptField") or "userInstruction").strip() or "userInstruction"
     uploaded_prompt_file = parse_uploaded_prompt_file(payload.get("promptFileName"), payload.get("promptFileContentBase64"))
     if uploaded_prompt_file:
         prompts = uploaded_prompt_file["prompts"]
