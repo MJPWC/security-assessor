@@ -1260,6 +1260,54 @@ def target_request_error_message(exc):
     return redact_text(text)
 
 
+def target_endpoint_config_error(response, config):
+    status = response.get("status")
+    body = str(response.get("body") or "")
+    body_lower = body.lower()
+    target = config["targetUrl"].rstrip("/") + config["endpoint"]
+    if status is None:
+        return response.get("error") or f"Target endpoint could not be reached: {target}"
+    if status == 404:
+        return f"Prompt endpoint was not found: {target}. Check the running app URL and prompt endpoint path."
+    if status == 405:
+        return f"Prompt endpoint exists but does not allow {config['method']}. Check the HTTP method for {target}."
+    if status == 415:
+        return f"Prompt endpoint rejected the content type. Check headers and request body template for {target}."
+    if status == 413:
+        return "Prompt request is too large for the target endpoint. Reduce prompt size or target request payload."
+    if status == 401:
+        return "Target endpoint requires authentication. Add the required Authorization or API key header."
+    if status == 403 and not any(signal in body_lower for signal in config["expectedSignals"]):
+        return "Target endpoint returned 403 without an expected guardrail block signal. Check auth, permissions, CORS/API gateway rules, or endpoint access policy."
+    if status == 400:
+        request_shape_terms = [
+            "bad request",
+            "invalid json",
+            "invalid request",
+            "malformed",
+            "missing",
+            "required",
+            "expected",
+            "body",
+            "payload",
+            "field",
+            "parameter",
+            "schema",
+            "content-type",
+        ]
+        guardrail_terms = ["blocked", "guardrail", "policy", "restricted", "not allowed", "cannot comply", "forbidden"]
+        looks_like_request_shape_error = any(term in body_lower for term in request_shape_terms)
+        looks_like_guardrail_block = any(term in body_lower for term in guardrail_terms)
+        if looks_like_request_shape_error and not looks_like_guardrail_block:
+            sample = redact_text(body)[:300] or response.get("error") or "HTTP 400"
+            return (
+                "Target endpoint returned HTTP 400 before guardrail evaluation. "
+                "Check the request body template and required field names for this app. "
+                f"Response sample: {sample}"
+            )
+    return ""
+
+
 def guardrail_decision(failure_count, warning_count):
     if failure_count:
         return "Failed: guardrail behavior mismatch"
@@ -1482,6 +1530,9 @@ def run_guardrail_test(payload):
             time.sleep(config["rateLimitDelaySeconds"])
         response = send_guardrail_prompt(config, prompt_item["prompt"])
         sent_prompt_count += 1
+        endpoint_error = target_endpoint_config_error(response, config)
+        if endpoint_error:
+            raise ValueError(endpoint_error)
         was_blocked, reason = evaluate_guardrail_block(response, config["expectedSignals"])
         if response.get("status") is None:
             result = "warning"
