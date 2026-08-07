@@ -4,6 +4,7 @@ import csv
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -64,8 +65,29 @@ SECRET_PATTERNS = [
     ("Private key block", "critical", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----")),
     ("Bearer token", "high", re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{16,}")),
     ("Credentialed URL", "high", re.compile(r"\b(?:https?|mongodb(?:\+srv)?|postgres(?:ql)?|mysql|mssql|redis)://[^:\s/@]+:[^@\s]+@", re.I)),
-    ("Sensitive assignment", "high", re.compile(r"\b[\w.-]*(?:api[_-]?key|apikey|token|secret|password|client[_-]?secret|authorization|x-api-key)[\w.-]*\b\s*[:=]\s*[\"']?(?!\$\{)(?!<)(?!REDACTED)(?!change_me)(?!changeme)(?!TODO)(?!TBD)[^\"',\s}]{8,}", re.I)),
 ]
+
+SENSITIVE_ASSIGNMENT_RE = re.compile(
+    r"\b(?P<key>[\w.-]*(?:api[_-]?key|apikey|token|secret|password|client[_-]?secret|authorization|x-api-key)[\w.-]*)\b"
+    r"\s*[:=]\s*(?P<quote>[\"']?)(?P<value>[^\"',\s}]+)",
+    re.I,
+)
+TOKEN_METRIC_ASSIGNMENT_RE = re.compile(
+    r"\b[\w.-]*(?:token|tokens)[\w.-]*\b\s*[:=]\s*[\"']?"
+    r"(?:usage\.|[\w.]*[_-](?:prompt|completion|input|output|total|cached|reasoning)[_-]?tokens?\b|\d+\b)",
+    re.I,
+)
+NON_SECRET_TOKEN_KEY_RE = re.compile(
+    r"(?:^|[_\-.])(?:token|tokens)?(?:count|counts|usage|used|limit|budget|remaining|total|prompt|completion|input|output|cached|reasoning|byday|bydate|daily|monthly|estimate|estimated)(?:s|tokens)?(?:$|[_\-.])|"
+    r"(?:prompt|completion|input|output|total|cached|reasoning|usage|count|counts|limit|budget|remaining|byday|bydate|daily|monthly|estimate|estimated).*tokens?",
+    re.I,
+)
+NON_SECRET_URI_KEY_RE = re.compile(r"(?:uri|url|endpoint|host|domain|issuer|audience)$", re.I)
+PLACEHOLDER_SECRET_RE = re.compile(
+    r"^(?:\$\{[^}]+\}|process\.env\.[\w.]+|env\.[\w.]+|os\.environ(?:\.get)?\(?[\"']?[\w.]+|"
+    r"change_?me|changeme|todo|tbd|redacted|example|sample|dummy|null|none|undefined|true|false)$",
+    re.I,
+)
 
 SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
 SEVERITY_SORT = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -233,7 +255,10 @@ def scan_secrets(files, extract_dir, findings):
         text = file_path.read_text(errors="ignore")
         rel = str(file_path.relative_to(extract_dir))
         for name, severity, pattern in SECRET_PATTERNS:
-            matches = pattern.findall(text)
+            matches = [
+                match.group(0)
+                for match in pattern.finditer(text)
+            ]
             if matches:
                 sample = matches[0] if isinstance(matches[0], str) else str(matches[0])
                 add_finding(findings, severity, "Secret scanning", f"{name} detected in packaged text content.", {
@@ -241,7 +266,80 @@ def scan_secrets(files, extract_dir, findings):
                     "matchCount": len(matches),
                     "sample": redact_text(sample)[:160],
                 })
+        sensitive_assignments = [
+            analysis
+            for match in SENSITIVE_ASSIGNMENT_RE.finditer(text)
+            for analysis in [analyze_sensitive_assignment(match.group("key"), match.group("value"), match.group(0))]
+            if analysis
+        ]
+        by_severity = {}
+        for analysis in sensitive_assignments:
+            by_severity.setdefault(analysis["severity"], []).append(analysis)
+        for severity, analyses in by_severity.items():
+            sample = analyses[0]
+            add_finding(findings, severity, "Secret scanning", "Possible secret-like assignment detected in packaged text content.", {
+                "file": rel,
+                "matchCount": len(analyses),
+                "key": sample["key"],
+                "confidence": sample["confidence"],
+                "reason": sample["reason"],
+                "sample": redact_text(sample["sample"])[:160],
+            })
     return {"scannedFiles": scanned}
+
+
+def shannon_entropy(value):
+    text = str(value or "")
+    if not text:
+        return 0.0
+    return -sum((text.count(char) / len(text)) * math.log2(text.count(char) / len(text)) for char in set(text))
+
+
+def analyze_sensitive_assignment(key, value, sample):
+    key_text = str(key or "")
+    key_lower = key_text.lower()
+    value_text = str(value or "").strip().strip("\"'")
+    value_lower = value_text.lower()
+    if not value_text:
+        return None
+    if TOKEN_METRIC_ASSIGNMENT_RE.search(sample):
+        return None
+    if "token" in key_lower and NON_SECRET_TOKEN_KEY_RE.search(key_lower):
+        return None
+    if "authorization" in key_lower and NON_SECRET_URI_KEY_RE.search(key_lower):
+        return None
+    if PLACEHOLDER_SECRET_RE.fullmatch(value_text):
+        return None
+    if value_lower.startswith(("http://", "https://")) and not re.search(r"://[^/\s:@]+:[^@\s]+@", value_lower):
+        return None
+    if re.fullmatch(r"[a-z0-9.-]+\.[a-z]{2,}(?::\d+)?(?:/[^\s]*)?", value_lower):
+        return None
+    if re.fullmatch(r"\d+(?:\.\d+)?", value_text):
+        return None
+    entropy = shannon_entropy(value_text)
+    has_secret_key = any(term in key_lower for term in ["apikey", "api_key", "x-api-key", "clientsecret", "client_secret", "password", "secret"])
+    has_token_key = "token" in key_lower or "authorization" in key_lower
+    if has_secret_key and len(value_text) >= 8:
+        severity = "high"
+        confidence = "high" if entropy >= 3.0 or len(value_text) >= 16 else "medium"
+        reason = "Sensitive key name with a literal value."
+    elif has_token_key and len(value_text) >= 16 and entropy >= 3.0:
+        severity = "high"
+        confidence = "high"
+        reason = "Token-like key with a long high-entropy literal value."
+    elif has_token_key and len(value_text) >= 8:
+        severity = "medium"
+        confidence = "medium"
+        reason = "Token-like key with a literal value that needs review."
+    else:
+        return None
+    return {
+        "severity": severity,
+        "confidence": confidence,
+        "reason": reason,
+        "key": key_text,
+        "sample": sample,
+    }
 
 
 def parse_openssl_date(value):
