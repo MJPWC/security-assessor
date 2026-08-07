@@ -69,7 +69,8 @@ SECRET_PATTERNS = [
 
 SENSITIVE_ASSIGNMENT_RE = re.compile(
     r"\b(?P<key>[\w.-]*(?:api[_-]?key|apikey|token|secret|password|client[_-]?secret|authorization|x-api-key)[\w.-]*)\b"
-    r"\s*[:=]\s*(?P<quote>[\"']?)(?P<value>[^\"',\s}]+)",
+    r"\s*[:=]\s*(?P<quote>[\"'`]?)"
+    r"(?P<value>[^\"'`,\s}\\)]+)",
     re.I,
 )
 TOKEN_METRIC_ASSIGNMENT_RE = re.compile(
@@ -83,11 +84,13 @@ NON_SECRET_TOKEN_KEY_RE = re.compile(
     re.I,
 )
 NON_SECRET_URI_KEY_RE = re.compile(r"(?:uri|url|endpoint|host|domain|issuer|audience)$", re.I)
+NON_SECRET_AUTH_CONFIG_KEY_RE = re.compile(r"(?:grant|grants|granttypes|grant_types|scopes|methods|flows)$", re.I)
 PLACEHOLDER_SECRET_RE = re.compile(
-    r"^(?:\$\{[^}]+\}|process\.env\.[\w.]+|env\.[\w.]+|os\.environ(?:\.get)?\(?[\"']?[\w.]+|"
+    r"^(?:\$\{?.*}?\)?|process\.env\.[\w.]+|env\.[\w.]+|os\.environ(?:\.get)?\(?[\"']?[\w.]+|"
     r"change_?me|changeme|todo|tbd|redacted|example|sample|dummy|null|none|undefined|true|false)$",
     re.I,
 )
+OAUTH_GRANT_VALUE_RE = re.compile(r"^(?:authorization_code|client_credentials|refresh_token|password|implicit|urn:[\w:.-]+)$", re.I)
 
 SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
 SEVERITY_SORT = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -269,7 +272,7 @@ def scan_secrets(files, extract_dir, findings):
         sensitive_assignments = [
             analysis
             for match in SENSITIVE_ASSIGNMENT_RE.finditer(text)
-            for analysis in [analyze_sensitive_assignment(match.group("key"), match.group("value"), match.group(0))]
+            for analysis in [analyze_sensitive_assignment(match.group("key"), match.group("value"), match.group(0), match.group("quote"))]
             if analysis
         ]
         by_severity = {}
@@ -295,7 +298,16 @@ def shannon_entropy(value):
     return -sum((text.count(char) / len(text)) * math.log2(text.count(char) / len(text)) for char in set(text))
 
 
-def analyze_sensitive_assignment(key, value, sample):
+def is_code_reference_value(value):
+    text = str(value or "").strip()
+    return bool(
+        text.startswith(("${", "$", "{", "["))
+        or re.search(r"\b(?:process\.env|import\.meta\.env|env\.|os\.environ|config\.|settings\.|usage\.|response\.|request\.|req\.|res\.)", text, re.I)
+        or re.fullmatch(r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+", text)
+    )
+
+
+def analyze_sensitive_assignment(key, value, sample, quote=""):
     key_text = str(key or "")
     key_lower = key_text.lower()
     value_text = str(value or "").strip().strip("\"'")
@@ -308,7 +320,13 @@ def analyze_sensitive_assignment(key, value, sample):
         return None
     if "authorization" in key_lower and NON_SECRET_URI_KEY_RE.search(key_lower):
         return None
+    if "authorization" in key_lower and NON_SECRET_AUTH_CONFIG_KEY_RE.search(key_lower):
+        return None
     if PLACEHOLDER_SECRET_RE.fullmatch(value_text):
+        return None
+    if is_code_reference_value(value_text):
+        return None
+    if OAUTH_GRANT_VALUE_RE.fullmatch(value_text) and "authorization" in key_lower:
         return None
     if value_lower.startswith(("http://", "https://")) and not re.search(r"://[^/\s:@]+:[^@\s]+@", value_lower):
         return None
