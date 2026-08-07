@@ -1053,12 +1053,18 @@ def run_quality_llm_review(payload):
         return "LLM quality review unavailable: " + redact_text(str(exc)) + fallback_hint
 
 
-def combined_deployment_verdict(security_payload, quality_payload):
+def combined_deployment_verdict(security_payload, quality_payload, guardrail_payload=None):
     security_decision = str(security_payload.get("decision") or "").lower()
     quality_decision = str(quality_payload.get("decision") or "").lower()
+    guardrail_payload = guardrail_payload or {}
+    guardrail_decision = str(guardrail_payload.get("decision") or "").lower()
     if not security_decision or not quality_decision:
         raise ValueError("Both security and quality decisions are required.")
-    if "blocked" in security_decision:
+    if "failed" in guardrail_decision:
+        status = "Do not deploy"
+        reason = "Prompt guardrail testing found unsafe or unexpected prompt behavior."
+        required_action = "Fix prompt guardrail failures and rerun the prompt guardrail test before deployment."
+    elif "blocked" in security_decision:
         if "pending security review" in security_decision:
             status = "Do not deploy without security approval"
             reason = "Security assessment is blocked pending security review."
@@ -1083,9 +1089,15 @@ def combined_deployment_verdict(security_payload, quality_payload):
         status = "Deploy only after quality review approval"
         reason = "Security is acceptable, but quality review is recommended."
         required_action = "Complete quality review approval or remediate the review findings."
+    elif "warning" in guardrail_decision:
+        status = "Deploy only after prompt guardrail review approval"
+        reason = "Security and quality may be acceptable, but prompt guardrail testing produced warnings."
+        required_action = "Review prompt guardrail warnings and document approval or rerun after fixing endpoint/configuration issues."
     elif "passed" in quality_decision and "approved" in security_decision:
         status = "Deployable"
         reason = "Security and quality checks are in acceptable states."
+        if guardrail_decision:
+            reason = "Security, quality, and prompt guardrail checks are in acceptable states."
         required_action = "Proceed with normal environment-specific release validation."
     else:
         status = "Review required before deployment"
@@ -1098,11 +1110,13 @@ def combined_deployment_verdict(security_payload, quality_payload):
         "reason": reason,
         "requiredAction": required_action,
         "securityDecision": security_payload.get("decision"),
+        "guardrailDecision": guardrail_payload.get("decision") if guardrail_payload else "Not run / not applicable",
         "qualityDecision": quality_payload.get("decision"),
     }
 
 
-def run_deployment_llm_advisory(verdict, security_payload, quality_payload):
+def run_deployment_llm_advisory(verdict, security_payload, quality_payload, guardrail_payload=None):
+    guardrail_payload = guardrail_payload or {}
     safe_payload = redact_value({
         "finalVerdict": verdict,
         "security": {
@@ -1110,6 +1124,11 @@ def run_deployment_llm_advisory(verdict, security_payload, quality_payload):
             "findingCounts": security_payload.get("findingCounts"),
             "reportCard": security_payload.get("reportCard"),
             "topFindings": (security_payload.get("findings") or [])[:20],
+        },
+        "promptGuardrail": {
+            "decision": guardrail_payload.get("decision") if guardrail_payload else "Not run / not applicable",
+            "summary": guardrail_payload.get("summary") if guardrail_payload else {},
+            "topTests": (guardrail_payload.get("tests") or [])[:20] if guardrail_payload else [],
         },
         "quality": {
             "decision": quality_payload.get("decision"),
@@ -1131,7 +1150,7 @@ def run_deployment_llm_advisory(verdict, security_payload, quality_payload):
             },
             {
                 "role": "user",
-                "content": "Explain this final deployment verdict using the security and quality summaries:\n\n" + json.dumps(safe_payload, indent=2),
+                "content": "Explain this final deployment verdict using the security, prompt guardrail, and quality summaries:\n\n" + json.dumps(safe_payload, indent=2),
             },
         ], config_label="Deployment verdict LLM"))
     except Exception as exc:
@@ -1140,13 +1159,14 @@ def run_deployment_llm_advisory(verdict, security_payload, quality_payload):
 
 def build_deployment_verdict(payload):
     security_payload = payload.get("security") or {}
+    guardrail_payload = payload.get("guardrail") or {}
     quality_payload = payload.get("quality") or {}
     if not security_payload.get("findingCounts"):
         raise ValueError("Run package Security Assessment before requesting final deployment verdict.")
     if "score" not in quality_payload:
         raise ValueError("Run Quality Assessment before requesting final deployment verdict.")
-    verdict = combined_deployment_verdict(security_payload, quality_payload)
-    verdict["advisory"] = run_deployment_llm_advisory(verdict, security_payload, quality_payload)
+    verdict = combined_deployment_verdict(security_payload, quality_payload, guardrail_payload)
+    verdict["advisory"] = run_deployment_llm_advisory(verdict, security_payload, quality_payload, guardrail_payload)
     verdict["generatedAt"] = datetime.now(timezone.utc).isoformat()
     return verdict
 

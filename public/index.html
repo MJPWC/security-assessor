@@ -753,7 +753,8 @@ cannot comply</textarea>
       let latestQualityFindings = [];
       let activeMode = 'security';
       const tabState = {
-        security: null,
+        packageSecurity: null,
+        guardrail: null,
         quality: null,
         deploymentVerdict: null
       };
@@ -793,27 +794,20 @@ cannot comply</textarea>
       }
 
       function restoreSecurityState() {
-        const state = tabState.security;
-        if (!state) {
+        if (!tabState.packageSecurity && !tabState.guardrail) {
           setDecision('No assessment yet');
           renderLinks();
           renderGuardrailLinks();
           reportEl.innerHTML = `<div class="report-empty">${emptyReportText('security')}</div>`;
           return;
         }
-        setDecision(state.payload.decision);
-        if (state.kind === 'guardrail') {
-          renderLinks();
-          renderGuardrailReport(state.payload);
-          renderGuardrailLinks(state.payload.runId);
-          return;
-        }
-        renderGuardrailLinks();
+        setDecision(combinedSecurityDecision());
         for (const key of Object.keys(counters)) {
-          counters[key].textContent = state.payload.findingCounts?.[key] || 0;
+          counters[key].textContent = tabState.packageSecurity?.findingCounts?.[key] || 0;
         }
-        renderReport(state.payload);
-        renderLinks(state.payload.runId);
+        renderLinks(tabState.packageSecurity?.runId);
+        renderGuardrailLinks(tabState.guardrail?.runId);
+        renderSecurityWorkspace();
       }
 
       function restoreQualityState() {
@@ -852,7 +846,8 @@ cannot comply</textarea>
       }
 
       function resetCachedReports() {
-        tabState.security = null;
+        tabState.packageSecurity = null;
+        tabState.guardrail = null;
         tabState.quality = null;
         tabState.deploymentVerdict = null;
         latestQualityFindings = [];
@@ -879,6 +874,15 @@ cannot comply</textarea>
         if (lower.includes('approved') && !lower.includes('conditional')) decisionEl.classList.add('approved');
         if (lower.includes('conditional')) decisionEl.classList.add('conditional');
         if (lower.includes('blocked')) decisionEl.classList.add('blocked');
+      }
+
+      function combinedSecurityDecision() {
+        const packageDecision = tabState.packageSecurity?.decision;
+        const guardrailDecision = tabState.guardrail?.decision;
+        if (guardrailDecision && String(guardrailDecision).toLowerCase().includes('failed')) {
+          return guardrailDecision;
+        }
+        return packageDecision || guardrailDecision || 'No assessment yet';
       }
 
       function arrayBufferToBase64(buffer) {
@@ -980,7 +984,7 @@ cannot comply</textarea>
       }
 
       function hasPackageSecurityResult() {
-        return tabState.security?.kind === 'assessment' && tabState.security?.payload?.findingCounts;
+        return Boolean(tabState.packageSecurity?.findingCounts);
       }
 
       function hasQualityResult() {
@@ -1001,6 +1005,7 @@ cannot comply</textarea>
               </div>
               <dl class="kv">
                 <dt>Security decision</dt><dd>${escapeHtml(verdict.securityDecision || '')}</dd>
+                <dt>Prompt guardrail</dt><dd>${escapeHtml(verdict.guardrailDecision || 'Not run / not applicable')}</dd>
                 <dt>Quality decision</dt><dd>${escapeHtml(verdict.qualityDecision || '')}</dd>
                 <dt>Reason</dt><dd>${escapeHtml(verdict.reason || '')}</dd>
                 <dt>Required action</dt><dd>${escapeHtml(verdict.requiredAction || '')}</dd>
@@ -1019,7 +1024,8 @@ cannot comply</textarea>
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            security: tabState.security.payload,
+            security: tabState.packageSecurity,
+            guardrail: tabState.guardrail,
             quality: tabState.quality
           })
         });
@@ -1168,7 +1174,7 @@ cannot comply</textarea>
         qualityLocationModal.hidden = false;
       }
 
-      function renderReport(payload) {
+      function securityReportHtml(payload) {
         const counts = payload.findingCounts || {};
         const findings = payload.findings || [];
         const certificateScan = payload.certificateScan || {};
@@ -1216,7 +1222,7 @@ cannot comply</textarea>
             <td>${escapeHtml(pipAudit.reason || '')}</td>
           </tr>`
         ];
-        reportEl.innerHTML = `
+        return `
           <section class="report-card">
             <h2>Assessment Summary</h2>
             <div class="card-body">
@@ -1260,11 +1266,14 @@ cannot comply</textarea>
             <h2>Dependency Vulnerability Scans</h2>
             ${renderTable(['Scanner', 'Status', 'Vulnerabilities', 'Reason'], auditRows, 'No dependency vulnerability scanners were run.')}
           </section>
-          ${renderDeploymentVerdict()}
         `;
       }
 
-      function renderGuardrailReport(payload) {
+      function renderReport(payload) {
+        reportEl.innerHTML = `${securityReportHtml(payload)}${renderDeploymentVerdict()}`;
+      }
+
+      function guardrailReportHtml(payload) {
         const summary = payload.summary || {};
         const rows = (payload.tests || []).map(item => `
           <tr>
@@ -1277,7 +1286,7 @@ cannot comply</textarea>
             <td>${escapeHtml(item.attempts || '')}</td>
             <td>${escapeHtml(item.reason || '')}</td>
           </tr>`);
-        reportEl.innerHTML = `
+        return `
           <section class="report-card">
             <h2>Prompt Guardrail Test Summary</h2>
             <div class="card-body">
@@ -1300,6 +1309,21 @@ cannot comply</textarea>
             ${renderTable(['Prompt', 'Type', 'Severity', 'Expected', 'Result', 'HTTP', 'Attempts', 'Reason'], rows, 'No prompt tests were executed.')}
           </section>
         `;
+      }
+
+      function renderGuardrailReport(payload) {
+        reportEl.innerHTML = guardrailReportHtml(payload);
+      }
+
+      function renderSecurityWorkspace() {
+        const sections = [];
+        if (tabState.packageSecurity) sections.push(securityReportHtml(tabState.packageSecurity));
+        if (tabState.guardrail) sections.push(guardrailReportHtml(tabState.guardrail));
+        if (sections.length) {
+          reportEl.innerHTML = `${sections.join('')}${renderDeploymentVerdict()}`;
+        } else {
+          reportEl.innerHTML = `<div class="report-empty">${emptyReportText('security')}</div>`;
+        }
       }
 
       function renderQualityReport(payload) {
@@ -1391,16 +1415,16 @@ cannot comply</textarea>
           for (const key of Object.keys(counters)) {
             counters[key].textContent = payload.findingCounts?.[key] || 0;
           }
-          tabState.security = { kind: 'assessment', payload };
+          tabState.packageSecurity = payload;
           try {
             await refreshDeploymentVerdict();
           } catch (verdictError) {
             tabState.deploymentVerdict = null;
             setStatus(`Assessment completed, but final deployment verdict failed: ${verdictError.message}`);
           }
-          renderReport(payload);
+          renderSecurityWorkspace();
           renderLinks(payload.runId);
-          renderGuardrailLinks();
+          renderGuardrailLinks(tabState.guardrail?.runId);
           if (!statusEl.textContent.includes('final deployment verdict failed')) {
             setStatus(`Completed run ${payload.runId}. Components found: ${payload.componentCount}.`);
           }
@@ -1470,12 +1494,19 @@ cannot comply</textarea>
           const payload = await response.json();
           if (!response.ok) throw new Error(payload.error || 'Prompt guardrail test failed.');
           setDecision(payload.decision);
-          tabState.security = { kind: 'guardrail', payload };
-          tabState.deploymentVerdict = null;
-          renderGuardrailReport(payload);
+          tabState.guardrail = payload;
+          try {
+            await refreshDeploymentVerdict();
+          } catch (verdictError) {
+            tabState.deploymentVerdict = null;
+            setStatus(`Prompt guardrail completed, but final deployment verdict failed: ${verdictError.message}`);
+          }
+          renderSecurityWorkspace();
           renderGuardrailLinks(payload.runId);
-          renderLinks();
-          setStatus(`Completed prompt guardrail run ${payload.runId}. Failed prompts: ${payload.summary?.failed || 0}.`);
+          renderLinks(tabState.packageSecurity?.runId);
+          if (!statusEl.textContent.includes('final deployment verdict failed')) {
+            setStatus(`Completed prompt guardrail run ${payload.runId}. Failed prompts: ${payload.summary?.failed || 0}.`);
+          }
         } catch (error) {
           setDecision('Failed');
           reportEl.innerHTML = `<div class="report-empty">${escapeHtml(error.message)}</div>`;
