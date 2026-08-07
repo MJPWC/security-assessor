@@ -1060,37 +1060,59 @@ def combined_deployment_verdict(security_payload, quality_payload, guardrail_pay
     guardrail_decision = str(guardrail_payload.get("decision") or "").lower()
     if not security_decision or not quality_decision:
         raise ValueError("Both security and quality decisions are required.")
+
+    blocking_issues = []
+    review_items = []
+    required_approvals = []
+    prompt_guardrail_status = guardrail_payload.get("decision") if guardrail_payload else "Not run / not applicable"
+
     if "failed" in guardrail_decision:
+        blocking_issues.append("Prompt guardrail failed")
         status = "Do not deploy"
         reason = "Prompt guardrail testing found unsafe or unexpected prompt behavior."
         required_action = "Fix prompt guardrail failures and rerun the prompt guardrail test before deployment."
     elif "blocked" in security_decision:
         if "pending security review" in security_decision:
+            required_approvals.append("Security owner")
+            review_items.append("Security assessment is blocked pending security review")
             status = "Do not deploy without security approval"
             reason = "Security assessment is blocked pending security review."
             required_action = "Get security owner approval or remediate the security findings, then rerun the assessment."
         else:
+            blocking_issues.append("Package security assessment found blocking risk")
             status = "Do not deploy"
             reason = "Security assessment found blocking risk."
             required_action = "Fix the blocking security findings and rerun security and quality assessment."
     elif "failed" in quality_decision:
+        blocking_issues.append("Quality assessment failed the quality gate")
         status = "Do not deploy"
         reason = "Quality assessment failed the quality gate."
         required_action = "Fix quality gate failures and rerun the quality assessment."
     elif "conditional" in security_decision and "passed" in quality_decision:
-        status = "Deploy with security exception approval"
+        required_approvals.append("Security owner")
+        review_items.append("Security conditional findings require exception approval")
+        status = "Conditional deploy"
         reason = "Quality passed, but security requires conditional approval."
         required_action = "Record the security exception/approval before deployment."
     elif "conditional" in security_decision:
-        status = "Deploy only after security and quality review approval"
+        required_approvals.extend(["Security owner", "Quality reviewer"])
+        review_items.extend([
+            "Security conditional findings require exception approval",
+            "Quality findings require review before release",
+        ])
+        status = "Conditional deploy"
         reason = "Security is conditional and quality still requires review."
         required_action = "Resolve or formally accept security and quality review items."
     elif "review recommended" in quality_decision:
-        status = "Deploy only after quality review approval"
+        required_approvals.append("Quality reviewer")
+        review_items.append("Quality findings require review before release")
+        status = "Conditional deploy"
         reason = "Security is acceptable, but quality review is recommended."
         required_action = "Complete quality review approval or remediate the review findings."
     elif "warning" in guardrail_decision:
-        status = "Deploy only after prompt guardrail review approval"
+        required_approvals.append("Prompt guardrail reviewer")
+        review_items.append("Prompt guardrail produced warnings")
+        status = "Conditional deploy"
         reason = "Security and quality may be acceptable, but prompt guardrail testing produced warnings."
         required_action = "Review prompt guardrail warnings and document approval or rerun after fixing endpoint/configuration issues."
     elif "passed" in quality_decision and "approved" in security_decision:
@@ -1103,12 +1125,19 @@ def combined_deployment_verdict(security_payload, quality_payload, guardrail_pay
         status = "Review required before deployment"
         reason = "The combined assessment state is not clearly deployable."
         required_action = "Review security and quality reports before deployment."
-    css_class = "pass" if status == "Deployable" else "medium" if "approval" in status.lower() or "review" in status.lower() else "fail"
+        review_items.append("Assessment state needs manual release review")
+    css_class = "pass" if status == "Deployable" else "fail" if blocking_issues or status.startswith("Do not deploy") else "medium"
+    next_action = required_action
     return {
         "status": status,
         "className": css_class,
         "reason": reason,
         "requiredAction": required_action,
+        "nextAction": next_action,
+        "requiredApprovals": required_approvals or ["None"],
+        "blockingIssues": blocking_issues or ["None"],
+        "reviewItems": review_items or ["None"],
+        "promptGuardrailStatus": prompt_guardrail_status,
         "securityDecision": security_payload.get("decision"),
         "guardrailDecision": guardrail_payload.get("decision") if guardrail_payload else "Not run / not applicable",
         "qualityDecision": quality_payload.get("decision"),

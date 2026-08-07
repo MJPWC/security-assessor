@@ -351,6 +351,13 @@
         min-width: 0;
         overflow-wrap: anywhere;
       }
+      .compact-list {
+        margin: 0;
+        padding-left: 18px;
+      }
+      .compact-list li + li {
+        margin-top: 4px;
+      }
       .report-card-grid {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -991,6 +998,11 @@ cannot comply</textarea>
         return Boolean(tabState.quality?.findingCounts);
       }
 
+      function renderVerdictList(items) {
+        const values = Array.isArray(items) ? items : [items || 'None'];
+        return `<ul class="compact-list">${values.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`;
+      }
+
       function renderDeploymentVerdict() {
         const verdict = tabState.deploymentVerdict;
         if (!verdict) return '';
@@ -1004,11 +1016,15 @@ cannot comply</textarea>
                 ${pill(verdict.status || 'Review required', cssClass)}
               </div>
               <dl class="kv">
+                <dt>Deployment status</dt><dd>${escapeHtml(verdict.status || 'Review required')}</dd>
                 <dt>Security decision</dt><dd>${escapeHtml(verdict.securityDecision || '')}</dd>
-                <dt>Prompt guardrail</dt><dd>${escapeHtml(verdict.guardrailDecision || 'Not run / not applicable')}</dd>
+                <dt>Prompt guardrail</dt><dd>${escapeHtml(verdict.promptGuardrailStatus || verdict.guardrailDecision || 'Not run / not applicable')}</dd>
                 <dt>Quality decision</dt><dd>${escapeHtml(verdict.qualityDecision || '')}</dd>
+                <dt>Blocking issues</dt><dd>${renderVerdictList(verdict.blockingIssues)}</dd>
+                <dt>Required approvals</dt><dd>${renderVerdictList(verdict.requiredApprovals)}</dd>
+                <dt>Review items</dt><dd>${renderVerdictList(verdict.reviewItems)}</dd>
                 <dt>Reason</dt><dd>${escapeHtml(verdict.reason || '')}</dd>
-                <dt>Required action</dt><dd>${escapeHtml(verdict.requiredAction || '')}</dd>
+                <dt>Next action</dt><dd>${escapeHtml(verdict.nextAction || verdict.requiredAction || '')}</dd>
               </dl>
               <div>${renderMarkdown(verdict.advisory || 'AI deployment advisory was not generated.')}</div>
             </div>
