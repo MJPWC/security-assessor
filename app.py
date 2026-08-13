@@ -62,6 +62,7 @@ SECRET_PATTERNS = [
     ("Anthropic API key", "critical", re.compile(r"sk-ant-api[0-9a-z_-]*-[A-Za-z0-9_-]{20,}")),
     ("GitHub token", "critical", re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}\b")),
     ("AWS access key", "critical", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("JWT", "high", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")),
     ("Private key block", "critical", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----")),
     ("Bearer token", "high", re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{16,}")),
     ("Credentialed URL", "high", re.compile(r"\b(?:https?|mongodb(?:\+srv)?|postgres(?:ql)?|mysql|mssql|redis)://[^:\s/@]+:[^@\s]+@", re.I)),
@@ -73,24 +74,32 @@ SENSITIVE_ASSIGNMENT_RE = re.compile(
     r"(?P<value>[^\"'`,\s}\\)]+)",
     re.I,
 )
+CLIENT_ID_ASSIGNMENT_RE = re.compile(
+    r"\b(?P<key>[\w.-]*(?:client[_-]?id|clientId)[\w.-]*)\b"
+    r"\s*[:=]\s*(?P<quote>[\"'`]?)"
+    r"(?P<value>[^\"'`,\s}\\)]+)",
+    re.I,
+)
 TOKEN_METRIC_ASSIGNMENT_RE = re.compile(
     r"\b[\w.-]*(?:token|tokens)[\w.-]*\b\s*[:=]\s*[\"']?"
     r"(?:usage\.|[\w.]*[_-](?:prompt|completion|input|output|total|cached|reasoning)[_-]?tokens?\b|\d+\b)",
     re.I,
 )
 NON_SECRET_TOKEN_KEY_RE = re.compile(
-    r"(?:^|[_\-.])(?:token|tokens)?(?:count|counts|usage|used|limit|budget|remaining|total|prompt|completion|input|output|cached|reasoning|byday|bydate|daily|monthly|estimate|estimated)(?:s|tokens)?(?:$|[_\-.])|"
-    r"(?:prompt|completion|input|output|total|cached|reasoning|usage|count|counts|limit|budget|remaining|byday|bydate|daily|monthly|estimate|estimated).*tokens?",
+    r"(?:^|[_\-.])(?:token|tokens)?(?:count|counts|usage|used|limit|budget|remaining|total|prompt|completion|input|output|cached|reasoning|byday|bydate|daily|monthly|estimate|estimated|created|created_at|expires|resolved|el)(?:s|tokens)?(?:$|[_\-.])|"
+    r"(?:prompt|completion|input|output|total|cached|reasoning|usage|count|counts|limit|budget|remaining|byday|bydate|daily|monthly|estimate|estimated|created|expires|resolved).*tokens?",
     re.I,
 )
 NON_SECRET_URI_KEY_RE = re.compile(r"(?:uri|url|endpoint|host|domain|issuer|audience)$", re.I)
 NON_SECRET_AUTH_CONFIG_KEY_RE = re.compile(r"(?:grant|grants|granttypes|grant_types|scopes|methods|flows)$", re.I)
 PLACEHOLDER_SECRET_RE = re.compile(
-    r"^(?:\$\{?.*}?\)?|process\.env\.[\w.]+|env\.[\w.]+|os\.environ(?:\.get)?\(?[\"']?[\w.]+|"
-    r"change_?me|changeme|todo|tbd|redacted|example|sample|dummy|null|none|undefined|true|false)$",
+    r"^(?:<[^>]+>|\$\{?.*}?\)?|process\.env\.[\w.]+|import\.meta\.env\.[\w.]+|env\.[\w.]+|os\.environ(?:\.get)?\(?[\"']?[\w.]+|"
+    r"your[_-]?[a-z0-9_-]*|my[_-]?[a-z0-9_-]*|change_?me|changeme|todo|tbd|redacted|example|sample|dummy|placeholder|"
+    r"abc(?:123)?|xyz(?:789)?|foo|bar|baz|null|none|undefined|true|false)$",
     re.I,
 )
 OAUTH_GRANT_VALUE_RE = re.compile(r"^(?:authorization_code|client_credentials|refresh_token|password|implicit|urn:[\w:.-]+)$", re.I)
+FRONTEND_REFERENCE_RE = re.compile(r"(?:document\.getElementById|querySelector|input\.value|event\.target\.value|formData\.get|localStorage\.getItem|sessionStorage\.getItem)", re.I)
 
 SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
 SEVERITY_SORT = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -251,6 +260,8 @@ def should_read_as_text(file_path):
 
 def scan_secrets(files, extract_dir, findings):
     scanned = 0
+    false_positives = []
+    needs_review = []
     for file_path in files:
         if not should_read_as_text(file_path):
             continue
@@ -267,28 +278,82 @@ def scan_secrets(files, extract_dir, findings):
                 add_finding(findings, severity, "Secret scanning", f"{name} detected in packaged text content.", {
                     "file": rel,
                     "matchCount": len(matches),
+                    "classification": "TRUE_POSITIVE",
+                    "confidence": "high",
                     "sample": redact_text(sample)[:160],
                 })
-        sensitive_assignments = [
-            analysis
-            for match in SENSITIVE_ASSIGNMENT_RE.finditer(text)
-            for analysis in [analyze_sensitive_assignment(match.group("key"), match.group("value"), match.group(0), match.group("quote"))]
-            if analysis
-        ]
-        by_severity = {}
+        sensitive_assignments = []
+        client_secret_analyses = []
+        client_id_analyses = []
+        for match in SENSITIVE_ASSIGNMENT_RE.finditer(text):
+            analysis = analyze_sensitive_assignment(match.group("key"), match.group("value"), match.group(0), match.group("quote"))
+            if not analysis:
+                continue
+            analysis["file"] = rel
+            if analysis["classification"] == "FALSE_POSITIVE":
+                false_positives.append(analysis)
+            elif analysis["classification"] == "NEEDS_REVIEW":
+                if "client" in analysis["key"].lower() and "secret" in analysis["key"].lower():
+                    client_secret_analyses.append(analysis)
+                needs_review.append(analysis)
+                sensitive_assignments.append(analysis)
+            else:
+                if "client" in analysis["key"].lower() and "secret" in analysis["key"].lower():
+                    client_secret_analyses.append(analysis)
+                sensitive_assignments.append(analysis)
+        for match in CLIENT_ID_ASSIGNMENT_RE.finditer(text):
+            analysis = analyze_client_id_assignment(match.group("key"), match.group("value"), match.group(0))
+            if analysis:
+                analysis["file"] = rel
+                client_id_analyses.append(analysis)
+        if client_id_analyses and client_secret_analyses:
+            client_pair = client_id_analyses[0]
+            sensitive_assignments.append({
+                "severity": "high",
+                "classification": "TRUE_POSITIVE",
+                "confidence": "high",
+                "reason": "Non-placeholder clientId/clientSecret pair appears hardcoded in the same file.",
+                "key": client_pair["key"],
+                "sample": client_pair["sample"],
+                "file": rel,
+            })
+        by_assignment_type = {}
         for analysis in sensitive_assignments:
-            by_severity.setdefault(analysis["severity"], []).append(analysis)
-        for severity, analyses in by_severity.items():
+            if analysis["classification"] == "FALSE_POSITIVE":
+                continue
+            key = (analysis["severity"], analysis["classification"], analysis["key"])
+            by_assignment_type.setdefault(key, []).append(analysis)
+        for (severity, classification, assignment_key), analyses in by_assignment_type.items():
             sample = analyses[0]
-            add_finding(findings, severity, "Secret scanning", "Possible secret-like assignment detected in packaged text content.", {
+            details = "Possible secret-like assignment detected in packaged text content."
+            if classification == "NEEDS_REVIEW":
+                details = "Ambiguous secret-like assignment needs review."
+            elif assignment_key:
+                details = f"Possible secret-like assignment detected for `{assignment_key}`."
+            add_finding(findings, severity, "Secret scanning", details, {
                 "file": rel,
                 "matchCount": len(analyses),
                 "key": sample["key"],
+                "classification": classification,
                 "confidence": sample["confidence"],
                 "reason": sample["reason"],
                 "sample": redact_text(sample["sample"])[:160],
             })
-    return {"scannedFiles": scanned}
+    return {
+        "scannedFiles": scanned,
+        "falsePositiveCount": len(false_positives),
+        "needsReviewCount": len(needs_review),
+        "falsePositives": [
+            {
+                "file": item["file"],
+                "key": item["key"],
+                "classification": item["classification"],
+                "reason": item["reason"],
+                "sample": redact_text(item["sample"])[:160],
+            }
+            for item in false_positives[:100]
+        ],
+    }
 
 
 def shannon_entropy(value):
@@ -303,8 +368,40 @@ def is_code_reference_value(value):
     return bool(
         text.startswith(("${", "$", "{", "["))
         or re.search(r"\b(?:process\.env|import\.meta\.env|env\.|os\.environ|config\.|settings\.|usage\.|response\.|request\.|req\.|res\.)", text, re.I)
+        or FRONTEND_REFERENCE_RE.search(text)
         or re.fullmatch(r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+", text)
     )
+
+
+def classified_false_positive(key, sample, reason):
+    return {
+        "severity": "info",
+        "classification": "FALSE_POSITIVE",
+        "confidence": "none",
+        "reason": reason,
+        "key": str(key or ""),
+        "sample": sample,
+    }
+
+
+def analyze_client_id_assignment(key, value, sample):
+    value_text = str(value or "").strip().strip("\"'")
+    if not value_text:
+        return None
+    if PLACEHOLDER_SECRET_RE.fullmatch(value_text) or is_code_reference_value(value_text):
+        return None
+    if re.fullmatch(r"\d+(?:\.\d+)?", value_text):
+        return None
+    if len(value_text) < 8:
+        return None
+    return {
+        "severity": "info",
+        "classification": "NEEDS_REVIEW",
+        "confidence": "medium",
+        "reason": "Client ID literal found.",
+        "key": str(key or ""),
+        "sample": sample,
+    }
 
 
 def analyze_sensitive_assignment(key, value, sample, quote=""):
@@ -315,25 +412,27 @@ def analyze_sensitive_assignment(key, value, sample, quote=""):
     if not value_text:
         return None
     if TOKEN_METRIC_ASSIGNMENT_RE.search(sample):
-        return None
+        return classified_false_positive(key_text, sample, "Token accounting or usage metadata, not a secret value.")
     if "token" in key_lower and NON_SECRET_TOKEN_KEY_RE.search(key_lower):
-        return None
+        return classified_false_positive(key_text, sample, "Variable name is token metadata/counter state.")
     if "authorization" in key_lower and NON_SECRET_URI_KEY_RE.search(key_lower):
-        return None
+        return classified_false_positive(key_text, sample, "Authorization URI/URL/endpoint configuration, not a credential.")
     if "authorization" in key_lower and NON_SECRET_AUTH_CONFIG_KEY_RE.search(key_lower):
+        return classified_false_positive(key_text, sample, "OAuth authorization flow/grant configuration, not a credential.")
+    if "authorization" in key_lower and value_lower == "bearer":
         return None
     if PLACEHOLDER_SECRET_RE.fullmatch(value_text):
-        return None
+        return classified_false_positive(key_text, sample, "Placeholder, example, environment reference, or intentionally empty value.")
     if is_code_reference_value(value_text):
-        return None
+        return classified_false_positive(key_text, sample, "Runtime reference or frontend value read, not a hardcoded literal secret.")
     if OAUTH_GRANT_VALUE_RE.fullmatch(value_text) and "authorization" in key_lower:
-        return None
+        return classified_false_positive(key_text, sample, "OAuth grant value, not a credential.")
     if value_lower.startswith(("http://", "https://")) and not re.search(r"://[^/\s:@]+:[^@\s]+@", value_lower):
-        return None
+        return classified_false_positive(key_text, sample, "URL without embedded credentials.")
     if re.fullmatch(r"[a-z0-9.-]+\.[a-z]{2,}(?::\d+)?(?:/[^\s]*)?", value_lower):
-        return None
+        return classified_false_positive(key_text, sample, "Domain/host value without embedded credentials.")
     if re.fullmatch(r"\d+(?:\.\d+)?", value_text):
-        return None
+        return classified_false_positive(key_text, sample, "Numeric value, counter, or limit.")
     entropy = shannon_entropy(value_text)
     has_secret_key = any(term in key_lower for term in ["apikey", "api_key", "x-api-key", "clientsecret", "client_secret", "password", "secret"])
     has_token_key = "token" in key_lower or "authorization" in key_lower
@@ -341,18 +440,22 @@ def analyze_sensitive_assignment(key, value, sample, quote=""):
         severity = "high"
         confidence = "high" if entropy >= 3.0 or len(value_text) >= 16 else "medium"
         reason = "Sensitive key name with a literal value."
+        classification = "TRUE_POSITIVE" if confidence == "high" else "NEEDS_REVIEW"
     elif has_token_key and len(value_text) >= 16 and entropy >= 3.0:
         severity = "high"
         confidence = "high"
         reason = "Token-like key with a long high-entropy literal value."
+        classification = "TRUE_POSITIVE"
     elif has_token_key and len(value_text) >= 8:
         severity = "medium"
         confidence = "medium"
         reason = "Token-like key with a literal value that needs review."
+        classification = "NEEDS_REVIEW"
     else:
-        return None
+        return classified_false_positive(key_text, sample, "Sensitive-looking variable name without evidence of a real literal secret.")
     return {
         "severity": severity,
+        "classification": classification,
         "confidence": confidence,
         "reason": reason,
         "key": key_text,
