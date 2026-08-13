@@ -70,14 +70,12 @@ SECRET_PATTERNS = [
 
 SENSITIVE_ASSIGNMENT_RE = re.compile(
     r"\b(?P<key>[\w.-]*(?:api[_-]?key|apikey|token|secret|password|client[_-]?secret|authorization|x-api-key)[\w.-]*)\b"
-    r"\s*[:=]\s*(?P<quote>[\"'`]?)"
-    r"(?P<value>[^\"'`,\s}\\)]+)",
+    r"\s*[:=]\s*(?:(?P<quote>[\"'`])(?P<quoted_value>[^\r\n]*?)(?P=quote)|(?P<value>[^\"'`,\s}\\)]+))",
     re.I,
 )
 CLIENT_ID_ASSIGNMENT_RE = re.compile(
     r"\b(?P<key>[\w.-]*(?:client[_-]?id|clientId)[\w.-]*)\b"
-    r"\s*[:=]\s*(?P<quote>[\"'`]?)"
-    r"(?P<value>[^\"'`,\s}\\)]+)",
+    r"\s*[:=]\s*(?:(?P<quote>[\"'`])(?P<quoted_value>[^\r\n]*?)(?P=quote)|(?P<value>[^\"'`,\s}\\)]+))",
     re.I,
 )
 TOKEN_METRIC_ASSIGNMENT_RE = re.compile(
@@ -100,6 +98,16 @@ PLACEHOLDER_SECRET_RE = re.compile(
 )
 OAUTH_GRANT_VALUE_RE = re.compile(r"^(?:authorization_code|client_credentials|refresh_token|password|implicit|urn:[\w:.-]+)$", re.I)
 FRONTEND_REFERENCE_RE = re.compile(r"(?:document\.getElementById|querySelector|input\.value|event\.target\.value|formData\.get|localStorage\.getItem|sessionStorage\.getItem)", re.I)
+CONFIG_REFERENCE_RE = re.compile(
+    r"^(?:"
+    r"\$\{[^}]+\}|"
+    r"#\{[^}]+\}|"
+    r"\{\{[^}]+\}\}|"
+    r"%[A-Z_][A-Z0-9_]*%|"
+    r"\$[A-Z_][A-Z0-9_]*"
+    r")$",
+    re.I,
+)
 
 SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
 SEVERITY_SORT = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -286,7 +294,7 @@ def scan_secrets(files, extract_dir, findings):
         client_secret_analyses = []
         client_id_analyses = []
         for match in SENSITIVE_ASSIGNMENT_RE.finditer(text):
-            analysis = analyze_sensitive_assignment(match.group("key"), match.group("value"), match.group(0), match.group("quote"))
+            analysis = analyze_sensitive_assignment(match.group("key"), assignment_match_value(match), match.group(0), match.group("quote"))
             if not analysis:
                 continue
             analysis["file"] = rel
@@ -302,7 +310,7 @@ def scan_secrets(files, extract_dir, findings):
                     client_secret_analyses.append(analysis)
                 sensitive_assignments.append(analysis)
         for match in CLIENT_ID_ASSIGNMENT_RE.finditer(text):
-            analysis = analyze_client_id_assignment(match.group("key"), match.group("value"), match.group(0))
+            analysis = analyze_client_id_assignment(match.group("key"), assignment_match_value(match), match.group(0))
             if analysis:
                 analysis["file"] = rel
                 client_id_analyses.append(analysis)
@@ -366,11 +374,16 @@ def shannon_entropy(value):
 def is_code_reference_value(value):
     text = str(value or "").strip()
     return bool(
-        text.startswith(("${", "$", "{", "["))
+        CONFIG_REFERENCE_RE.fullmatch(text)
+        or text.startswith(("{", "["))
         or re.search(r"\b(?:process\.env|import\.meta\.env|env\.|os\.environ|config\.|settings\.|usage\.|response\.|request\.|req\.|res\.)", text, re.I)
         or FRONTEND_REFERENCE_RE.search(text)
         or re.fullmatch(r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+", text)
     )
+
+
+def assignment_match_value(match):
+    return match.group("quoted_value") if match.group("quote") else match.group("value")
 
 
 def classified_false_positive(key, sample, reason):
