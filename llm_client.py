@@ -10,6 +10,30 @@ APP_DIR = Path(__file__).resolve().parent
 LLM_PROVIDER_SEQUENCE = ["anthropic_gateway", "anthropic", "groq", "openai", "gemini", "openrouter"]
 SENSITIVE_KEY_RE = re.compile(r"(api[_-]?key|apikey|token|secret|password|client[_-]?secret|clientSecret|authorization|x-api-key)", re.I)
 PLACEHOLDER_MARKERS = ["__replace", "replace_me", "your_", "placeholder", "change_me", "changeme", "dummy", "example"]
+CONFIG_REFERENCE_RE = re.compile(
+    r"^(?:"
+    r"\$\{[^}]+\}|"
+    r"#\{[^}]+\}|"
+    r"\{\{[^}]+\}\}|"
+    r"%[A-Z_][A-Z0-9_]*%|"
+    r"\$[A-Z_][A-Z0-9_]*|"
+    r"process\.env\.[\w.]+|"
+    r"import\.meta\.env\.[\w.]+|"
+    r"env\.[\w.]+|"
+    r"os\.environ(?:\.get)?\(?[\"']?[\w.]+"
+    r")$",
+    re.I,
+)
+PLACEHOLDER_SECRET_RE = re.compile(
+    r"^(?:<[^>]+>|your[_-]?[a-z0-9_-]*|my[_-]?[a-z0-9_-]*|change_?me|changeme|todo|tbd|redacted|"
+    r"example|sample|dummy|placeholder|abc(?:123)?|xyz(?:789)?|foo|bar|baz|null|none|undefined|true|false)$",
+    re.I,
+)
+SENSITIVE_ASSIGNMENT_VALUE_RE = re.compile(
+    r"\b(?P<prefix>[\w.-]*(?:api[_-]?key|apikey|token|secret|password|client[_-]?secret|clientSecret|authorization|x-api-key)[\w.-]*\b\s*[:=]\s*)"
+    r"(?:(?P<quote>[\"'`])(?P<quoted_value>[^\r\n]*?)(?P=quote)|(?P<config_value>\$\{[^}\r\n]+\}|#\{[^}\r\n]+\}|\{\{[^}\r\n]+\}\}|%[A-Z_][A-Z0-9_]*%|\$[A-Z_][A-Z0-9_]*)|(?P<value>[^\"'`,\s}\\)]+))",
+    re.I,
+)
 
 
 def load_env_file(path, override=False):
@@ -46,13 +70,24 @@ def redact_text(value):
     ]
     for pattern, replacement in replacements:
         text = pattern.sub(replacement, text)
-    text = re.sub(
-        r"\b([\w.-]*(?:api[_-]?key|apikey|token|secret|password|client[_-]?secret|clientSecret|authorization|x-api-key)[\w.-]*\b\s*[:=]\s*[\"']?)([^\"',\s}]+)",
-        r"\1[REDACTED_SECRET]",
-        text,
-        flags=re.I,
-    )
-    return text
+    return SENSITIVE_ASSIGNMENT_VALUE_RE.sub(redact_assignment_match, text)
+
+
+def is_placeholder_or_reference(value):
+    text = str(value or "").strip().strip("\"'`")
+    if not text:
+        return True
+    return bool(CONFIG_REFERENCE_RE.fullmatch(text) or PLACEHOLDER_SECRET_RE.fullmatch(text))
+
+
+def redact_assignment_match(match):
+    value = match.group("quoted_value") if match.group("quote") else (match.group("config_value") or match.group("value"))
+    if is_placeholder_or_reference(value):
+        return match.group(0)
+    quote = match.group("quote") or ""
+    if quote:
+        return f"{match.group('prefix')}{quote}[REDACTED_SECRET]{quote}"
+    return f"{match.group('prefix')}[REDACTED_SECRET]"
 
 
 def redact_value(value):

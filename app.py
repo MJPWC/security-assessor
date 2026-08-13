@@ -70,12 +70,12 @@ SECRET_PATTERNS = [
 
 SENSITIVE_ASSIGNMENT_RE = re.compile(
     r"\b(?P<key>[\w.-]*(?:api[_-]?key|apikey|token|secret|password|client[_-]?secret|authorization|x-api-key)[\w.-]*)\b"
-    r"\s*[:=]\s*(?:(?P<quote>[\"'`])(?P<quoted_value>[^\r\n]*?)(?P=quote)|(?P<value>[^\"'`,\s}\\)]+))",
+    r"\s*[:=]\s*(?:(?P<quote>[\"'`])(?P<quoted_value>[^\r\n]*?)(?P=quote)|(?P<config_value>\$\{[^}\r\n]+\}|#\{[^}\r\n]+\}|\{\{[^}\r\n]+\}\}|%[A-Z_][A-Z0-9_]*%|\$[A-Z_][A-Z0-9_]*)|(?P<value>[^\"'`,\s}\\)]+))",
     re.I,
 )
 CLIENT_ID_ASSIGNMENT_RE = re.compile(
     r"\b(?P<key>[\w.-]*(?:client[_-]?id|clientId)[\w.-]*)\b"
-    r"\s*[:=]\s*(?:(?P<quote>[\"'`])(?P<quoted_value>[^\r\n]*?)(?P=quote)|(?P<value>[^\"'`,\s}\\)]+))",
+    r"\s*[:=]\s*(?:(?P<quote>[\"'`])(?P<quoted_value>[^\r\n]*?)(?P=quote)|(?P<config_value>\$\{[^}\r\n]+\}|#\{[^}\r\n]+\}|\{\{[^}\r\n]+\}\}|%[A-Z_][A-Z0-9_]*%|\$[A-Z_][A-Z0-9_]*)|(?P<value>[^\"'`,\s}\\)]+))",
     re.I,
 )
 TOKEN_METRIC_ASSIGNMENT_RE = re.compile(
@@ -383,7 +383,7 @@ def is_code_reference_value(value):
 
 
 def assignment_match_value(match):
-    return match.group("quoted_value") if match.group("quote") else match.group("value")
+    return match.group("quoted_value") if match.group("quote") else (match.group("config_value") or match.group("value"))
 
 
 def classified_false_positive(key, sample, reason):

@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from xml.sax.saxutils import escape
 
+from llm_client import redact_text as redact_sensitive_text
+
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 MAX_WALK_FILES = 3000
@@ -122,7 +124,7 @@ def add_finding(findings, severity, category, title, details, file="", line=""):
 
 
 def redact_text(text):
-    return SENSITIVE_TEXT_RE.sub("[REDACTED]", str(text or ""))
+    return redact_sensitive_text(text)
 
 
 def relative(path, root_dir):
