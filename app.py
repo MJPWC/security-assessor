@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import tarfile
+import tempfile
 import time
 import traceback
 import urllib.error
@@ -27,15 +28,43 @@ from quality_assessor import assess_quality
 
 APP_DIR = Path(__file__).resolve().parent
 PUBLIC_DIR = APP_DIR / "public"
-RUNS_DIR = APP_DIR / "output" / "security-assessor" / "runs"
+
+# RUNS_DIR intentionally lives OUTSIDE the app's own source tree.
+#
+# It used to be APP_DIR / "output" / "security-assessor" / "runs" -- i.e. inside
+# this repo's own working directory. That meant every uploaded build's extracted
+# contents, and every quality-check run's extracted contents, were written back
+# into the assessor's own folder. If anyone ever packaged *this* repo up (e.g. to
+# scan the assessor with itself, or a CI step that just tars the whole workspace)
+# without explicitly excluding output/, the new upload contained every prior run,
+# which then got extracted into yet another run under the same tree -- producing
+# unbounded, recursively-nested output (observed locally at 150MB+ before this fix).
+#
+# Default: a directory outside the repo (OS temp dir). Override with
+# SECURITY_ASSESSOR_RUNS_DIR for a persistent location if desired, but keep it
+# outside any directory that might itself get zipped up and re-uploaded.
+_DEFAULT_RUNS_DIR = Path(tempfile.gettempdir()) / "security-assessor-runs"
+RUNS_DIR = Path(os.getenv("SECURITY_ASSESSOR_RUNS_DIR", str(_DEFAULT_RUNS_DIR))).resolve()
+
 RESTRICTED_PROMPTS_PATH = APP_DIR / "restricted_prompts.json"
 ALLOWED_PROMPTS_PATH = APP_DIR / "allowed_prompts.json"
 PORT = int(os.getenv("SECURITY_ASSESSOR_PORT", "5050"))
 MAX_UPLOAD_BYTES = int(os.getenv("SECURITY_ASSESSOR_MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
+# Cap on total bytes written to disk while extracting an archive. This bounds
+# decompression ("zip bomb") blowup that MAX_UPLOAD_BYTES does not catch, since
+# MAX_UPLOAD_BYTES only limits the size of the compressed file received over the
+# wire, not what it expands to once extracted.
+MAX_EXTRACTED_BYTES = int(os.getenv("SECURITY_ASSESSOR_MAX_EXTRACTED_BYTES", str(500 * 1024 * 1024)))
 TEXT_FILE_LIMIT_BYTES = int(os.getenv("SECURITY_ASSESSOR_TEXT_FILE_LIMIT_BYTES", str(512 * 1024)))
 MAX_WALK_FILES = int(os.getenv("SECURITY_ASSESSOR_MAX_WALK_FILES", "3000"))
 MAX_PROMPT_FILE_BYTES = int(os.getenv("SECURITY_ASSESSOR_MAX_PROMPT_FILE_BYTES", str(1024 * 1024)))
 MAX_PROMPTS_PER_RUN = int(os.getenv("SECURITY_ASSESSOR_MAX_PROMPTS_PER_RUN", "250"))
+# A build package should never legitimately contain the assessor's own run
+# output. If it does, it's a strong signal the upload was packaged from this
+# app's own working directory without excluding output/ -- which is exactly
+# the pattern that causes runaway recursive nesting. We flag and skip these
+# paths rather than extracting them.
+SELF_REFERENTIAL_PATH_MARKER = "security-assessor/output/security-assessor/runs"
 
 TEXT_EXTENSIONS = {
     ".js", ".jsx", ".ts", ".tsx", ".json", ".yaml", ".yml", ".xml", ".properties",
@@ -60,6 +89,7 @@ WEAK_CERT_SIGNATURE_RE = re.compile(r"Signature Algorithm:\s*(?:md5|sha1)", re.I
 SECRET_PATTERNS = [
     ("OpenAI API key", "critical", re.compile(r"sk-(?:proj|svcacct)?-[A-Za-z0-9_-]{20,}")),
     ("Anthropic API key", "critical", re.compile(r"sk-ant-api[0-9a-z_-]*-[A-Za-z0-9_-]{20,}")),
+    ("Groq API key", "critical", re.compile(r"\bgsk_[A-Za-z0-9_-]{20,}\b")),
     ("GitHub token", "critical", re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}\b")),
     ("AWS access key", "critical", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
     ("JWT", "high", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")),
@@ -98,6 +128,16 @@ PLACEHOLDER_SECRET_RE = re.compile(
 )
 OAUTH_GRANT_VALUE_RE = re.compile(r"^(?:authorization_code|client_credentials|refresh_token|password|implicit|urn:[\w:.-]+)$", re.I)
 FRONTEND_REFERENCE_RE = re.compile(r"(?:document\.getElementById|querySelector|input\.value|event\.target\.value|formData\.get|localStorage\.getItem|sessionStorage\.getItem)", re.I)
+RUNTIME_VALUE_REFERENCE_RE = re.compile(
+    r"(?:"
+    r"\b(?:data|entry|session|request|credentials|payload|headers|params|query|body|form|response|response_data|res|req|[\w]+_data)\.get\s*\(|"
+    r"\b(?:response|res)\.json\s*\(|"
+    r"\bos\.environ(?:\.get)?\s*\(|"
+    r"\b(?:config|settings)\.[A-Za-z_][\w.]*|"
+    r"\b(?:str|int|float|bool)\s*\("
+    r")",
+    re.I,
+)
 CONFIG_REFERENCE_RE = re.compile(
     r"^(?:"
     r"\$\{[^}]+\}|"
@@ -108,11 +148,32 @@ CONFIG_REFERENCE_RE = re.compile(
     r")$",
     re.I,
 )
+CONFIG_REFERENCE_FRAGMENT_RE = re.compile(
+    r"(?:\\?\$\{[^}]+\}|#\{[^}]+\}|\{\{[^}]+\}\}|%[A-Z_][A-Z0-9_]*%|\$[A-Z_][A-Z0-9_]*)",
+    re.I,
+)
+GENERIC_QUOTED_LITERAL_RE = re.compile(r"(?P<quote>[\"'])(?P<value>[A-Za-z0-9][A-Za-z0-9._~+/=-]{15,})(?P=quote)")
+SENSITIVE_LITERAL_CONTEXT_RE = re.compile(
+    r"(?:api[_-]?key|apikey|x-api-key|token|secret|password|authorization|bearer|client[_-]?secret|clientSecret|os\.environ|getenv)",
+    re.I,
+)
+ENV_VAR_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{5,}$")
+LOW_VALUE_SECRET_LITERAL_RE = re.compile(
+    r"^(?:secret123|password123|changeme123|example[_-]?secret|dummy[_-]?token|"
+    r"abc(?:1234567890)?|xyz(?:789)?|[a-z]{1,4}123(?:4567890)?)$",
+    re.I,
+)
+MODEL_OR_VERSION_LITERAL_RE = re.compile(
+    r"^(?:[a-z0-9_.-]+/)?(?:gpt|claude|gemini|llama|mistral|mixtral|deepseek|qwen|command|cohere|openai|anthropic|groq|model)[a-z0-9_.:/-]*$",
+    re.I,
+)
+MEDIA_TYPE_LITERAL_RE = re.compile(r"^[a-z][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*(?:;[a-z0-9=_.+ -]+)?$", re.I)
 
 SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
 SEVERITY_SORT = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 DEFAULT_BLOCK_SIGNALS = ["blocked", "warning", "not allowed", "restricted", "policy", "cannot comply", "i can't help", "unauthorized", "forbidden"]
 BLOCKING_HTTP_STATUSES = {400, 401, 403, 406, 409, 422, 429}
+DOCUMENTATION_OR_RULE_PATH_RE = re.compile(r"(?:^|/)(?:docs?|examples?|samples?|rulesets?|readme|changelog|release-notes?|.*\.md|.*\.txt)(?:/|$)", re.I)
 
 
 def add_finding(findings, severity, task, details, evidence=None):
@@ -205,14 +266,59 @@ def is_safe_archive_entry(name):
     return ".." not in normalized.split("/")
 
 
+def is_self_referential_entry(name):
+    """True if this archive entry looks like the assessor's own prior run
+    output (see SELF_REFERENTIAL_PATH_MARKER). Such entries are dropped from
+    extraction rather than written to disk, to prevent an upload that was
+    accidentally packaged from this app's own working directory from causing
+    recursive, ever-growing nested output."""
+    normalized = str(name).replace("\\", "/").lower()
+    return SELF_REFERENTIAL_PATH_MARKER in normalized
+
+
+class ExtractedSizeLimitExceeded(Exception):
+    pass
+
+
 def safe_extract_zip(archive_path, extract_dir, findings):
     with zipfile.ZipFile(archive_path) as package:
-        names = package.namelist()
+        infos = package.infolist()
+        names = [info.filename for info in infos]
         unsafe = [name for name in names if not is_safe_archive_entry(name)]
         if unsafe:
             add_finding(findings, "critical", "Archive path safety", "Archive contains unsafe paths that could write outside the extraction directory.", {"entries": unsafe[:10]})
             return {"extracted": False, "entries": names[:500]}
-        package.extractall(extract_dir)
+
+        self_referential = [name for name in names if is_self_referential_entry(name)]
+        if self_referential:
+            add_finding(
+                findings, "medium", "Self-referential upload",
+                "Archive contains the security assessor's own prior run output "
+                "(output/security-assessor/runs/...). These entries were skipped "
+                "during extraction to avoid recursive nesting. Repackage the build "
+                "without including that directory.",
+                {"entries": self_referential[:10], "skippedCount": len(self_referential)},
+            )
+
+        total_declared = sum(info.file_size for info in infos if not info.is_dir())
+        if total_declared > MAX_EXTRACTED_BYTES:
+            add_finding(findings, "critical", "Archive extraction", "Archive's uncompressed size exceeds the extraction limit; extraction was aborted.", {
+                "declaredUncompressedBytes": total_declared,
+                "limitBytes": MAX_EXTRACTED_BYTES,
+            })
+            return {"extracted": False, "entries": names[:500]}
+
+        written_bytes = 0
+        for info in infos:
+            if info.is_dir() or is_self_referential_entry(info.filename):
+                continue
+            written_bytes += info.file_size
+            if written_bytes > MAX_EXTRACTED_BYTES:
+                add_finding(findings, "critical", "Archive extraction", "Extraction aborted after exceeding the maximum allowed extracted size.", {
+                    "limitBytes": MAX_EXTRACTED_BYTES,
+                })
+                return {"extracted": False, "entries": names[:500]}
+            package.extract(info, extract_dir)
         return {"extracted": True, "entries": names[:500]}
 
 
@@ -224,8 +330,41 @@ def safe_extract_tar(archive_path, extract_dir, findings):
         if unsafe:
             add_finding(findings, "critical", "Archive path safety", "Tar archive contains unsafe paths that could write outside the extraction directory.", {"entries": unsafe[:10]})
             return {"extracted": False, "entries": names[:500]}
-        safe_members = [member for member in members if not member.issym() and not member.islnk()]
-        package.extractall(extract_dir, members=safe_members)
+
+        self_referential = [name for name in names if is_self_referential_entry(name)]
+        if self_referential:
+            add_finding(
+                findings, "medium", "Self-referential upload",
+                "Archive contains the security assessor's own prior run output "
+                "(output/security-assessor/runs/...). These entries were skipped "
+                "during extraction to avoid recursive nesting. Repackage the build "
+                "without including that directory.",
+                {"entries": self_referential[:10], "skippedCount": len(self_referential)},
+            )
+
+        safe_members = [
+            member for member in members
+            if not member.issym() and not member.islnk() and not is_self_referential_entry(member.name)
+        ]
+
+        total_declared = sum(member.size for member in safe_members if member.isfile())
+        if total_declared > MAX_EXTRACTED_BYTES:
+            add_finding(findings, "critical", "Archive extraction", "Archive's uncompressed size exceeds the extraction limit; extraction was aborted.", {
+                "declaredUncompressedBytes": total_declared,
+                "limitBytes": MAX_EXTRACTED_BYTES,
+            })
+            return {"extracted": False, "entries": names[:500]}
+
+        written_bytes = 0
+        for member in safe_members:
+            if member.isfile():
+                written_bytes += member.size
+                if written_bytes > MAX_EXTRACTED_BYTES:
+                    add_finding(findings, "critical", "Archive extraction", "Extraction aborted after exceeding the maximum allowed extracted size.", {
+                        "limitBytes": MAX_EXTRACTED_BYTES,
+                    })
+                    return {"extracted": False, "entries": names[:500]}
+            package.extract(member, extract_dir)
         return {"extracted": True, "entries": names[:500]}
 
 
@@ -244,16 +383,31 @@ def extract_artifact(artifact_path, extract_dir, artifact_type, findings):
         return {"extracted": False, "entries": [artifact_path.name]}
 
 
-def walk_files(root_dir):
+def walk_files(root_dir, findings=None):
     files = []
+    truncated = False
     for current, dirs, names in os.walk(root_dir):
         dirs[:] = [name for name in dirs if not (Path(current) / name).is_symlink()]
         for name in names:
             if len(files) >= MAX_WALK_FILES:
-                return files
+                truncated = True
+                break
             path = Path(current) / name
             if not path.is_symlink() and path.is_file():
                 files.append(path)
+        if truncated:
+            break
+    if truncated and findings is not None:
+        # Previously this cap was hit silently: the report would look complete
+        # (e.g. "Approved for dev deployment") while a large fraction of the
+        # build was never actually scanned. Surface it as a finding instead.
+        add_finding(
+            findings, "medium", "Scan coverage",
+            f"File scan limit reached ({MAX_WALK_FILES} files). Some files in this "
+            "build were not scanned; results below may be incomplete. Increase "
+            "SECURITY_ASSESSOR_MAX_WALK_FILES to scan the full build.",
+            {"maxWalkFiles": MAX_WALK_FILES},
+        )
     return files
 
 
@@ -276,11 +430,11 @@ def scan_secrets(files, extract_dir, findings):
         scanned += 1
         text = file_path.read_text(errors="ignore")
         rel = str(file_path.relative_to(extract_dir))
+        known_secret_spans = []
         for name, severity, pattern in SECRET_PATTERNS:
-            matches = [
-                match.group(0)
-                for match in pattern.finditer(text)
-            ]
+            pattern_matches = list(pattern.finditer(text))
+            matches = [match.group(0) for match in pattern_matches]
+            known_secret_spans.extend((match.start(), match.end()) for match in pattern_matches)
             if matches:
                 sample = matches[0] if isinstance(matches[0], str) else str(matches[0])
                 add_finding(findings, severity, "Secret scanning", f"{name} detected in packaged text content.", {
@@ -290,11 +444,27 @@ def scan_secrets(files, extract_dir, findings):
                     "confidence": "high",
                     "sample": redact_text(sample)[:160],
                 })
+        sensitive_matches = list(SENSITIVE_ASSIGNMENT_RE.finditer(text))
+        sensitive_assignment_spans = [(match.start(), match.end()) for match in sensitive_matches]
+        for analysis in scan_generic_secret_literals(text, rel, known_secret_spans + sensitive_assignment_spans):
+            if analysis["classification"] == "FALSE_POSITIVE":
+                false_positives.append(analysis)
+                continue
+            if analysis["classification"] == "NEEDS_REVIEW":
+                needs_review.append(analysis)
+            add_finding(findings, analysis["severity"], "Secret scanning", analysis["details"], {
+                "file": rel,
+                "matchCount": 1,
+                "classification": analysis["classification"],
+                "confidence": analysis["confidence"],
+                "reason": analysis["reason"],
+                "sample": redact_text(analysis["sample"])[:160],
+            })
         sensitive_assignments = []
         client_secret_analyses = []
         client_id_analyses = []
-        for match in SENSITIVE_ASSIGNMENT_RE.finditer(text):
-            analysis = analyze_sensitive_assignment(match.group("key"), assignment_match_value(match), match.group(0), match.group("quote"))
+        for match in sensitive_matches:
+            analysis = analyze_sensitive_assignment(match.group("key"), assignment_match_value(match), match.group(0), match.group("quote"), rel)
             if not analysis:
                 continue
             analysis["file"] = rel
@@ -371,19 +541,98 @@ def shannon_entropy(value):
     return -sum((text.count(char) / len(text)) * math.log2(text.count(char) / len(text)) for char in set(text))
 
 
+def spans_overlap(start, end, spans):
+    return any(start < span_end and end > span_start for span_start, span_end in spans)
+
+
+def is_low_value_secret_literal(value):
+    text = str(value or "").strip()
+    if not text:
+        return True
+    if LOW_VALUE_SECRET_LITERAL_RE.fullmatch(text):
+        return True
+    repeated_chars = len(set(text)) <= 3 and len(text) >= 8
+    return repeated_chars
+
+
+def is_env_var_name(value):
+    return bool(ENV_VAR_NAME_RE.fullmatch(str(value or "").strip()))
+
+
+def is_probably_secret_literal(value):
+    text = str(value or "").strip()
+    if len(text) < 16:
+        return False
+    if (
+        is_env_var_name(text)
+        or is_low_value_secret_literal(text)
+        or PLACEHOLDER_SECRET_RE.fullmatch(text)
+        or CONFIG_REFERENCE_RE.fullmatch(text)
+        or re.fullmatch(r"https?://[^\s]+", text, re.I)
+        or re.fullmatch(r"[a-z0-9.-]+\.[a-z]{2,}(?::\d+)?(?:/[^\s]*)?", text, re.I)
+        or MODEL_OR_VERSION_LITERAL_RE.fullmatch(text)
+        or MEDIA_TYPE_LITERAL_RE.fullmatch(text)
+    ):
+        return False
+    if not (re.search(r"[A-Za-z]", text) and re.search(r"\d", text)):
+        return False
+    return shannon_entropy(text) >= 3.5
+
+
+def scan_generic_secret_literals(text, rel, known_secret_spans):
+    analyses = []
+    for match in GENERIC_QUOTED_LITERAL_RE.finditer(text):
+        if spans_overlap(match.start(), match.end(), known_secret_spans):
+            continue
+        value = match.group("value")
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        line_end = text.find("\n", match.end())
+        if line_end == -1:
+            line_end = len(text)
+        context = text[line_start:line_end]
+        if not SENSITIVE_LITERAL_CONTEXT_RE.search(context):
+            continue
+        if not is_probably_secret_literal(value):
+            continue
+        context_is_strong = re.search(r"(?:authorization|bearer|api[_-]?key|apikey|x-api-key|client[_-]?secret|clientSecret)", context, re.I)
+        analyses.append({
+            "severity": "high",
+            "classification": "TRUE_POSITIVE" if context_is_strong else "NEEDS_REVIEW",
+            "confidence": "high" if context_is_strong else "medium",
+            "reason": "High-entropy literal appears in a sensitive context.",
+            "details": "Possible hardcoded secret literal detected in sensitive code context.",
+            "key": "literal",
+            "sample": context.strip(),
+            "file": rel,
+        })
+    return analyses
+
+
 def is_code_reference_value(value):
     text = str(value or "").strip()
     return bool(
         CONFIG_REFERENCE_RE.fullmatch(text)
+        or CONFIG_REFERENCE_FRAGMENT_RE.search(text)
         or text.startswith(("{", "["))
         or re.search(r"\b(?:process\.env|import\.meta\.env|env\.|os\.environ|config\.|settings\.|usage\.|response\.|request\.|req\.|res\.)", text, re.I)
         or FRONTEND_REFERENCE_RE.search(text)
+        or RUNTIME_VALUE_REFERENCE_RE.search(text)
         or re.fullmatch(r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+", text)
     )
 
 
 def assignment_match_value(match):
     return match.group("quoted_value") if match.group("quote") else (match.group("config_value") or match.group("value"))
+
+
+def normalized_identifier(value):
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+
+def is_same_identifier_reference(key, value):
+    key_norm = normalized_identifier(key.split(".")[-1])
+    value_norm = normalized_identifier(str(value or "").strip().split(".")[-1])
+    return bool(key_norm and value_norm and key_norm == value_norm)
 
 
 def classified_false_positive(key, sample, reason):
@@ -398,10 +647,15 @@ def classified_false_positive(key, sample, reason):
 
 
 def analyze_client_id_assignment(key, value, sample):
-    value_text = str(value or "").strip().strip("\"'")
+    value_text = str(value or "").strip().strip("\"'`;")
     if not value_text:
         return None
-    if PLACEHOLDER_SECRET_RE.fullmatch(value_text) or is_code_reference_value(value_text):
+    if (
+        PLACEHOLDER_SECRET_RE.fullmatch(value_text)
+        or is_code_reference_value(value_text)
+        or is_same_identifier_reference(key, value_text)
+        or RUNTIME_VALUE_REFERENCE_RE.search(sample)
+    ):
         return None
     if re.fullmatch(r"\d+(?:\.\d+)?", value_text):
         return None
@@ -417,17 +671,43 @@ def analyze_client_id_assignment(key, value, sample):
     }
 
 
-def analyze_sensitive_assignment(key, value, sample, quote=""):
+def is_documentation_or_rule_file(rel):
+    rel_text = str(rel or "").replace("\\", "/")
+    name = Path(rel_text).name.lower()
+    return bool(
+        DOCUMENTATION_OR_RULE_PATH_RE.search(rel_text)
+        or name.endswith((".md", ".txt", ".rst"))
+        or "ruleset" in rel_text.lower()
+    )
+
+
+def analyze_sensitive_assignment(key, value, sample, quote="", source_file=""):
     key_text = str(key or "")
     key_lower = key_text.lower()
-    value_text = str(value or "").strip().strip("\"'")
+    value_text = str(value or "").strip().strip("\"'`;")
     value_lower = value_text.lower()
     if not value_text:
         return None
+    if CONFIG_REFERENCE_FRAGMENT_RE.search(sample):
+        return classified_false_positive(key_text, sample, "Configuration/property reference, not a hardcoded literal secret.")
+    if is_documentation_or_rule_file(source_file) and re.search(r"(?<![A-Za-z0-9])secret123(?![A-Za-z0-9])", value_text, re.I):
+        return classified_false_positive(key_text, sample, "Common documentation/example secret value, not a real credential.")
+    if any(marker in sample for marker in ["(?!", "[^", "\\$\\{", "\\$\\["]):
+        return classified_false_positive(key_text, sample, "Secret-detection regex or rule definition, not a credential value.")
+    if re.fullmatch(r"(?:Optional|Union|List|Dict|Set|Tuple|Sequence|Mapping)\[[^\]]+\]", value_text):
+        return classified_false_positive(key_text, sample, "Type annotation, not a credential value.")
+    if is_same_identifier_reference(key_text, value_text):
+        return classified_false_positive(key_text, sample, "Object shorthand or variable forwarding, not a hardcoded literal secret.")
+    if RUNTIME_VALUE_REFERENCE_RE.search(sample):
+        return classified_false_positive(key_text, sample, "Runtime request/session/config lookup, not a hardcoded literal secret.")
     if TOKEN_METRIC_ASSIGNMENT_RE.search(sample):
         return classified_false_positive(key_text, sample, "Token accounting or usage metadata, not a secret value.")
     if "token" in key_lower and NON_SECRET_TOKEN_KEY_RE.search(key_lower):
         return classified_false_positive(key_text, sample, "Variable name is token metadata/counter state.")
+    if key_lower in {"max_tokens", "max-token", "maxtokens", "resolved_tokens", "resolvedtokens"}:
+        return classified_false_positive(key_text, sample, "Token limit/accounting parameter, not a credential.")
+    if key_lower.endswith(".access_token") and not re.search(r"[\"'][A-Za-z0-9._~+/=-]{16,}[\"']", sample):
+        return classified_false_positive(key_text, sample, "Access token attribute reference without a hardcoded token literal.")
     if "authorization" in key_lower and NON_SECRET_URI_KEY_RE.search(key_lower):
         return classified_false_positive(key_text, sample, "Authorization URI/URL/endpoint configuration, not a credential.")
     if "authorization" in key_lower and NON_SECRET_AUTH_CONFIG_KEY_RE.search(key_lower):
@@ -450,8 +730,8 @@ def analyze_sensitive_assignment(key, value, sample, quote=""):
     has_secret_key = any(term in key_lower for term in ["apikey", "api_key", "x-api-key", "clientsecret", "client_secret", "password", "secret"])
     has_token_key = "token" in key_lower or "authorization" in key_lower
     if has_secret_key and len(value_text) >= 8:
-        severity = "high"
         confidence = "high" if entropy >= 3.0 or len(value_text) >= 16 else "medium"
+        severity = "high" if confidence == "high" else "medium"
         reason = "Sensitive key name with a literal value."
         classification = "TRUE_POSITIVE" if confidence == "high" else "NEEDS_REVIEW"
     elif has_token_key and len(value_text) >= 16 and entropy >= 3.0:
@@ -903,13 +1183,43 @@ def run_pip_audit_if_possible(extract_dir, findings):
     total_vulnerabilities = 0
     attempted = False
 
+    # pip-audit against a requirements.txt is pure static analysis of pinned
+    # versions -- it never installs anything. Pointing pip-audit at a
+    # pyproject.toml *project directory* instead of a lockfile is different:
+    # to resolve dependencies, pip-audit can invoke the project's build
+    # backend (setup.py / PEP 517 build hooks), which means an untrusted
+    # uploaded build could execute arbitrary code on this server during a
+    # "security scan". So by default we do NOT resolve pyproject.toml
+    # projects; we just flag them and recommend exporting a requirements.txt
+    # for audit. Set SECURITY_ASSESSOR_ALLOW_PYPROJECT_RESOLVE=true to opt
+    # back into the old (unsafe) behavior in a fully trusted/sandboxed host.
+    allow_pyproject_resolve = (os.getenv("SECURITY_ASSESSOR_ALLOW_PYPROJECT_RESOLVE") or "").strip().lower() in {"1", "true", "yes"}
+
     for target in targets:
-        attempted = True
         rel_target = "." if target["project"] == extract_dir else str(target["project"].relative_to(extract_dir))
         rel_file = str(target["file"].relative_to(extract_dir))
         target_vulnerabilities = 0
         target_ok = False
         error_message = None
+
+        if target["kind"] == "pyproject" and not allow_pyproject_resolve:
+            add_finding(findings, "info", "Known vulnerability scan",
+                "Skipped pip-audit for a pyproject.toml project because resolving "
+                "its dependencies can execute the project's own build backend "
+                "code. Export a requirements.txt (e.g. `pip freeze` or "
+                "`poetry export`) for a safe, static vulnerability audit, or set "
+                "SECURITY_ASSESSOR_ALLOW_PYPROJECT_RESOLVE=true in a trusted, "
+                "sandboxed environment to allow resolving it.",
+                {"project": rel_target, "file": rel_file})
+            results.append({
+                "project": rel_target,
+                "ok": False,
+                "vulnerabilityCount": 0,
+                "error": "skipped: pyproject.toml resolution disabled by default (build-backend execution risk)",
+            })
+            continue
+
+        attempted = True
         try:
             command = [
                 "pip-audit",
@@ -1994,6 +2304,17 @@ def build_markdown_report(assessment):
     ]
     for severity in ["critical", "high", "medium", "low", "info"]:
         lines.append(f"| {severity} | {assessment['findingCounts'].get(severity, 0)} |")
+    secret_scan = assessment.get("secretScan") or {}
+    lines.extend([
+        "",
+        "## Secret Scan Classification",
+        "",
+        "| Metric | Count |",
+        "| --- | ---: |",
+        f"| Text files scanned | {secret_scan.get('scannedFiles', 0)} |",
+        f"| False positives ignored | {secret_scan.get('falsePositiveCount', 0)} |",
+        f"| Needs review | {secret_scan.get('needsReviewCount', 0)} |",
+    ])
     # Security Report Card export disabled for current development.
     # lines.extend([
     #     "",
@@ -2279,6 +2600,14 @@ def build_xlsx_report(assessment):
     ]
     for severity in ["critical", "high", "medium", "low", "info"]:
         summary_rows.append([severity, assessment["findingCounts"].get(severity, 0)])
+    secret_scan = assessment.get("secretScan") or {}
+    summary_rows.extend([
+        [],
+        style_header(["Secret Scan Metric", "Count"]),
+        ["Text files scanned", secret_scan.get("scannedFiles", 0)],
+        ["False positives ignored", secret_scan.get("falsePositiveCount", 0)],
+        ["Needs review", secret_scan.get("needsReviewCount", 0)],
+    ])
     summary_rows.extend([
         [],
         style_header(["Check", "Status"]),
@@ -2396,9 +2725,7 @@ def assess_artifact(file_name, content_base64):
         "sha256": hashlib.sha256(data).hexdigest(),
     }
     archive = extract_artifact(artifact_path, extract_dir, artifact["type"], findings)
-    files = walk_files(extract_dir)
-    if len(files) >= MAX_WALK_FILES:
-        add_finding(findings, "medium", "Archive size guard", f"File walk stopped at {MAX_WALK_FILES} files to avoid resource exhaustion.", {})
+    files = walk_files(extract_dir, findings)
     secret_scan = scan_secrets(files, extract_dir, findings)
     certificate_scan = scan_certificates(files, extract_dir, findings)
     components = collect_dependency_inventory(files, extract_dir, findings)

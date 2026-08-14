@@ -15,7 +15,16 @@ from llm_client import redact_text as redact_sensitive_text
 
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+# Cap on total bytes written to disk while extracting an archive (uncompressed
+# size), independent of MAX_UPLOAD_BYTES which only bounds the compressed
+# upload received over the wire.
+MAX_EXTRACTED_BYTES = int(os.getenv("SECURITY_ASSESSOR_MAX_EXTRACTED_BYTES", str(500 * 1024 * 1024)))
 MAX_WALK_FILES = 3000
+# A build package should never legitimately contain the assessor's own prior
+# run output. If it does, the upload was likely packaged from this app's own
+# working directory without excluding output/ -- skip those entries instead
+# of extracting them, to avoid recursive, ever-growing nested output.
+SELF_REFERENTIAL_PATH_MARKER = "security-assessor/output/security-assessor/runs"
 TEXT_FILE_LIMIT_BYTES = 512 * 1024
 QUALITY_EXTENSIONS = {
     ".js", ".jsx", ".ts", ".tsx", ".py", ".java", ".xml", ".json", ".yaml",
@@ -34,7 +43,8 @@ QUALITY_SCORE_WEIGHTS = {"critical": 30, "high": 15, "medium": 3, "low": 0.25, "
 QUALITY_SCORE_CAPS = {"critical": 90, "high": 60, "medium": 30, "low": 10, "info": 0}
 SENSITIVE_TEXT_RE = re.compile(
     r"(sk-[A-Za-z0-9_-]{12,}|AKIA[0-9A-Z]{16}|Bearer\s+[A-Za-z0-9._~+/=-]{12,}|"
-    r"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*['\"]?[^'\"\s,}]{6,})"
+    r"(api[_-]?key|token|secret|password)\s*[:=]\s*['\"]?[^'\"\s,}]{6,})",
+    re.I,
 )
 
 
@@ -69,26 +79,80 @@ def is_safe_archive_entry(name):
     return normalized and not normalized.startswith("/") and "\x00" not in normalized and ".." not in Path(normalized).parts
 
 
-def extract_artifact(artifact_path, extract_dir, artifact_type):
+def is_self_referential_entry(name):
+    return SELF_REFERENTIAL_PATH_MARKER in str(name).replace("\\", "/").lower()
+
+
+def extract_artifact(artifact_path, extract_dir, artifact_type, findings=None):
     if artifact_type in {"zip", "java-jar", "java-war", "python-wheel"}:
         with zipfile.ZipFile(artifact_path) as package:
-            for member in package.infolist():
-                if is_safe_archive_entry(member.filename):
-                    package.extract(member, extract_dir)
+            infos = package.infolist()
+            self_referential = [m.filename for m in infos if is_self_referential_entry(m.filename)]
+            if self_referential and findings is not None:
+                add_finding(findings, "medium", "Self-referential upload",
+                    "Archive contains the security assessor's own prior run output "
+                    "(output/security-assessor/runs/...); those entries were skipped.",
+                    {"entries": self_referential[:10], "skippedCount": len(self_referential)})
+            declared_total = sum(m.file_size for m in infos if not m.is_dir() and is_safe_archive_entry(m.filename) and not is_self_referential_entry(m.filename))
+            if declared_total > MAX_EXTRACTED_BYTES:
+                if findings is not None:
+                    add_finding(findings, "critical", "Archive extraction",
+                        "Archive's uncompressed size exceeds the extraction limit; extraction was aborted.",
+                        {"declaredUncompressedBytes": declared_total, "limitBytes": MAX_EXTRACTED_BYTES})
+                return {"extracted": False, "type": "zip"}
+            written = 0
+            for member in infos:
+                if not is_safe_archive_entry(member.filename) or is_self_referential_entry(member.filename):
+                    continue
+                written += member.file_size
+                if written > MAX_EXTRACTED_BYTES:
+                    if findings is not None:
+                        add_finding(findings, "critical", "Archive extraction",
+                            "Extraction aborted after exceeding the maximum allowed extracted size.",
+                            {"limitBytes": MAX_EXTRACTED_BYTES})
+                    return {"extracted": False, "type": "zip"}
+                package.extract(member, extract_dir)
         return {"extracted": True, "type": "zip"}
     if artifact_type in {"tarball", "tar"}:
         with tarfile.open(artifact_path) as package:
-            for member in package.getmembers():
-                if is_safe_archive_entry(member.name):
-                    package.extract(member, extract_dir)
+            members = package.getmembers()
+            self_referential = [m.name for m in members if is_self_referential_entry(m.name)]
+            if self_referential and findings is not None:
+                add_finding(findings, "medium", "Self-referential upload",
+                    "Archive contains the security assessor's own prior run output "
+                    "(output/security-assessor/runs/...); those entries were skipped.",
+                    {"entries": self_referential[:10], "skippedCount": len(self_referential)})
+            safe_members = [
+                m for m in members
+                if is_safe_archive_entry(m.name) and not is_self_referential_entry(m.name)
+            ]
+            declared_total = sum(m.size for m in safe_members if m.isfile())
+            if declared_total > MAX_EXTRACTED_BYTES:
+                if findings is not None:
+                    add_finding(findings, "critical", "Archive extraction",
+                        "Archive's uncompressed size exceeds the extraction limit; extraction was aborted.",
+                        {"declaredUncompressedBytes": declared_total, "limitBytes": MAX_EXTRACTED_BYTES})
+                return {"extracted": False, "type": "tar"}
+            written = 0
+            for member in safe_members:
+                if member.isfile():
+                    written += member.size
+                    if written > MAX_EXTRACTED_BYTES:
+                        if findings is not None:
+                            add_finding(findings, "critical", "Archive extraction",
+                                "Extraction aborted after exceeding the maximum allowed extracted size.",
+                                {"limitBytes": MAX_EXTRACTED_BYTES})
+                        return {"extracted": False, "type": "tar"}
+                package.extract(member, extract_dir)
         return {"extracted": True, "type": "tar"}
     target = extract_dir / artifact_path.name
     target.write_bytes(artifact_path.read_bytes())
     return {"extracted": False, "type": "single-file"}
 
 
-def walk_files(root_dir):
+def walk_files(root_dir, findings=None):
     files = []
+    truncated = False
     for current, dirs, names in os.walk(root_dir):
         current = Path(current)
         dirs[:] = [name for name in dirs if name not in SKIP_DIRS and not name.startswith(".")]
@@ -97,7 +161,15 @@ def walk_files(root_dir):
             if not path.is_symlink() and path.is_file():
                 files.append(path)
                 if len(files) >= MAX_WALK_FILES:
-                    return files
+                    truncated = True
+                    break
+        if truncated:
+            break
+    if truncated and findings is not None:
+        add_finding(findings, "medium", "Scan coverage",
+            f"File scan limit reached ({MAX_WALK_FILES} files). Some files in this "
+            "build were not scanned; results below may be incomplete.",
+            {"maxWalkFiles": MAX_WALK_FILES})
     return files
 
 
@@ -776,10 +848,12 @@ def assess_quality(file_name, content_base64, runs_dir, llm_reviewer=None):
         "sizeBytes": len(data),
         "sha256": hashlib.sha256(data).hexdigest(),
     }
-    archive = extract_artifact(artifact_path, extract_dir, artifact["type"])
-    files = walk_files(extract_dir)
+    extraction_findings = []
+    archive = extract_artifact(artifact_path, extract_dir, artifact["type"], extraction_findings)
+    files = walk_files(extract_dir, extraction_findings)
     raw_findings, metrics = scan_text_quality(files, extract_dir)
     readiness_findings, readiness_metrics = scan_deployment_readiness(files, extract_dir, metrics)
+    raw_findings = extraction_findings + raw_findings
     raw_findings.extend(readiness_findings)
     metrics["readiness"] = readiness_metrics
     counts = {}

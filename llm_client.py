@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import math
 import os
 import re
 import urllib.error
@@ -9,6 +10,29 @@ from pathlib import Path
 APP_DIR = Path(__file__).resolve().parent
 LLM_PROVIDER_SEQUENCE = ["anthropic_gateway", "anthropic", "groq", "openai", "gemini", "openrouter"]
 SENSITIVE_KEY_RE = re.compile(r"(api[_-]?key|apikey|token|secret|password|client[_-]?secret|clientSecret|authorization|x-api-key)", re.I)
+NON_SECRET_REPORT_KEYS = {
+    "secretscan",
+    "falsepositives",
+    "falsepositivecount",
+    "needsreviewcount",
+    "classification",
+    "confidence",
+    "reason",
+    "evidence",
+    "findings",
+    "occurrences",
+}
+NON_SECRET_TOKEN_KEYS = {
+    "max_token",
+    "max_tokens",
+    "maxtokens",
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "resolved_tokens",
+    "token_count",
+    "token_usage",
+}
 PLACEHOLDER_MARKERS = ["__replace", "replace_me", "your_", "placeholder", "change_me", "changeme", "dummy", "example"]
 CONFIG_REFERENCE_RE = re.compile(
     r"^(?:"
@@ -32,6 +56,13 @@ PLACEHOLDER_SECRET_RE = re.compile(
 SENSITIVE_ASSIGNMENT_VALUE_RE = re.compile(
     r"\b(?P<prefix>[\w.-]*(?:api[_-]?key|apikey|token|secret|password|client[_-]?secret|clientSecret|authorization|x-api-key)[\w.-]*\b\s*[:=]\s*)"
     r"(?:(?P<quote>[\"'`])(?P<quoted_value>[^\r\n]*?)(?P=quote)|(?P<config_value>\$\{[^}\r\n]+\}|#\{[^}\r\n]+\}|\{\{[^}\r\n]+\}\}|%[A-Z_][A-Z0-9_]*%|\$[A-Z_][A-Z0-9_]*)|(?P<value>[^\"'`,\s}\\)]+))",
+    re.I,
+)
+GENERIC_QUOTED_LITERAL_RE = re.compile(r"(?P<quote>[\"'])(?P<value>[A-Za-z0-9][A-Za-z0-9._~+/=-]{19,})(?P=quote)")
+ENV_VAR_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{5,}$")
+RUNTIME_REFERENCE_PREFIX_RE = re.compile(
+    r"(?:os\.environ(?:\.get)?\s*\(?|process\.env\.|import\.meta\.env\.|env\.|"
+    r"(?:data|entry|session|request|credentials|payload|headers|params|query|body|form|response|response_data|res|req|[\w]+_data)\.get\s*\()",
     re.I,
 )
 
@@ -63,6 +94,7 @@ def redact_text(value):
     replacements = [
         (re.compile(r"sk-(?:proj|svcacct)?-[A-Za-z0-9_-]{20,}", re.I), "[REDACTED_OPENAI_KEY]"),
         (re.compile(r"sk-ant-api[0-9a-z_-]*-[A-Za-z0-9_-]{20,}", re.I), "[REDACTED_ANTHROPIC_KEY]"),
+        (re.compile(r"\bgsk_[A-Za-z0-9_-]{20,}\b"), "[REDACTED_GROQ_KEY]"),
         (re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}\b"), "[REDACTED_GITHUB_TOKEN]"),
         (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED_AWS_ACCESS_KEY]"),
         (re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----", re.I), "[REDACTED_PRIVATE_KEY]"),
@@ -70,14 +102,47 @@ def redact_text(value):
     ]
     for pattern, replacement in replacements:
         text = pattern.sub(replacement, text)
-    return SENSITIVE_ASSIGNMENT_VALUE_RE.sub(redact_assignment_match, text)
+    text = SENSITIVE_ASSIGNMENT_VALUE_RE.sub(redact_assignment_match, text)
+    return GENERIC_QUOTED_LITERAL_RE.sub(redact_generic_literal_match, text)
+
+
+def shannon_entropy(value):
+    text = str(value or "")
+    if not text:
+        return 0.0
+    return -sum((text.count(char) / len(text)) * math.log2(text.count(char) / len(text)) for char in set(text))
+
+
+def is_probably_secret_literal(value):
+    text = str(value or "").strip()
+    return bool(
+        len(text) >= 20
+        and not ENV_VAR_NAME_RE.fullmatch(text)
+        and not CONFIG_REFERENCE_RE.fullmatch(text)
+        and not PLACEHOLDER_SECRET_RE.fullmatch(text)
+        and re.search(r"[A-Za-z]", text)
+        and re.search(r"\d", text)
+        and shannon_entropy(text) >= 3.5
+    )
+
+
+def redact_generic_literal_match(match):
+    value = match.group("value")
+    if not is_probably_secret_literal(value):
+        return match.group(0)
+    quote = match.group("quote")
+    return f"{quote}[REDACTED_SECRET_LITERAL]{quote}"
 
 
 def is_placeholder_or_reference(value):
     text = str(value or "").strip().strip("\"'`")
     if not text:
         return True
-    return bool(CONFIG_REFERENCE_RE.fullmatch(text) or PLACEHOLDER_SECRET_RE.fullmatch(text))
+    return bool(
+        CONFIG_REFERENCE_RE.fullmatch(text)
+        or PLACEHOLDER_SECRET_RE.fullmatch(text)
+        or RUNTIME_REFERENCE_PREFIX_RE.search(text)
+    )
 
 
 def redact_assignment_match(match):
@@ -97,10 +162,23 @@ def redact_value(value):
         return [redact_value(item) for item in value]
     if isinstance(value, dict):
         return {
-            key: "[REDACTED_SECRET]" if SENSITIVE_KEY_RE.search(str(key)) else redact_value(item)
+            key: "[REDACTED_SECRET]" if should_redact_key(key) else redact_value(item)
             for key, item in value.items()
         }
     return value
+
+
+def should_redact_key(key):
+    key_text = str(key or "")
+    key_lower = key_text.lower()
+    normalized = re.sub(r"[^a-z0-9]", "", key_lower)
+    if normalized in NON_SECRET_REPORT_KEYS or key_lower in NON_SECRET_TOKEN_KEYS:
+        return False
+    return bool(
+        key_lower.endswith(("password", "secret", "token", "authorization"))
+        or key_lower.endswith(("api_key", "apikey", "x-api-key", "client_secret", "clientsecret", "access_token", "refresh_token", "id_token"))
+        or key_lower in {"api-key", "x-api-key"}
+    )
 
 
 def env_value(name):

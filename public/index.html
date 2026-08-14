@@ -1193,6 +1193,7 @@ cannot comply</textarea>
       function securityReportHtml(payload) {
         const counts = payload.findingCounts || {};
         const findings = payload.findings || [];
+        const secretScan = payload.secretScan || {};
         const certificateScan = payload.certificateScan || {};
         const certificateFiles = certificateScan.certificateFiles || [];
         const components = payload.components || [];
@@ -1247,6 +1248,7 @@ cannot comply</textarea>
                 <dt>Decision</dt><dd>${pill(payload.decision || 'Unknown')}</dd>
                 <dt>Components</dt><dd>${escapeHtml(payload.componentCount || 0)}</dd>
                 <dt>Findings</dt><dd>Critical ${counts.critical || 0} · High ${counts.high || 0} · Medium ${counts.medium || 0} · Low ${counts.low || 0}</dd>
+                <dt>Secret scan</dt><dd>${escapeHtml(secretScan.scannedFiles || 0)} files · ${escapeHtml(secretScan.falsePositiveCount || 0)} false positive(s) ignored · ${escapeHtml(secretScan.needsReviewCount || 0)} need review</dd>
                 <dt>Displayed rows</dt><dd>${escapeHtml(payload.displayFindingTotal || findings.length)} summarized from ${escapeHtml(payload.findingTotal || findings.length)} finding(s)</dd>
                 <dt>Certificates</dt><dd>${certificateFiles.length}</dd>
               </dl>
