@@ -75,6 +75,35 @@ CONFIG_FILE_NAMES = {
     ".env", ".env.local", "application.properties", "application.yml", "application.yaml",
     "bootstrap.properties", "bootstrap.yml", "bootstrap.yaml", "config.json", "settings.py",
 }
+# Extensions where an *unquoted* `KEY=value` is the normal way to write a
+# literal string (.env, properties, shell exports, ini/conf/yaml-as-flat-kv,
+# etc). Outside these, in real source code, a string literal must be quoted
+# by the language's own syntax -- so an unquoted right-hand side there is
+# always a variable, function/method call, number, boolean, or other
+# expression, never a hardcoded secret string. Rather than pattern-matching
+# every possible shape of "code" (which is an open-ended, ever-growing list),
+# unquoted assignments are only treated as potential literal secrets when the
+# file itself uses unquoted-literal syntax.
+LITERAL_VALUE_FILE_EXTENSIONS = {
+    ".env", ".properties", ".ini", ".conf", ".cfg", ".toml", ".sh", ".bat", ".ps1",
+    ".yml", ".yaml",
+}
+LITERAL_VALUE_FILE_NAMES = {
+    "dockerfile", "makefile", "envfile", "env",
+}
+
+
+def is_literal_value_file(rel):
+    """True for files where an unquoted KEY=value is a real literal string
+    (.env, shell scripts, ini/properties/toml, Dockerfiles), as opposed to
+    source code files where an unquoted RHS is a code expression, not a
+    string literal."""
+    name = Path(str(rel or "")).name.lower()
+    if name in LITERAL_VALUE_FILE_NAMES or name.startswith(".env"):
+        return True
+    suffix = Path(str(rel or "")).suffix.lower()
+    return suffix in LITERAL_VALUE_FILE_EXTENSIONS
+
 DEV_ENV_RE = re.compile(r"\b(dev|development|local|localhost|127\.0\.0\.1|staging|test|qa|sandbox)\b", re.I)
 URL_RE = re.compile(r"\bhttps?://[^\s\"'<>)}]+", re.I)
 COPYLEFT_LICENSE_RE = re.compile(r"\b(AGPL|GPL|LGPL|SSPL)\b", re.I)
@@ -100,12 +129,12 @@ SECRET_PATTERNS = [
 
 SENSITIVE_ASSIGNMENT_RE = re.compile(
     r"\b(?P<key>[\w.-]*(?:api[_-]?key|apikey|token|secret|password|client[_-]?secret|authorization|x-api-key)[\w.-]*)\b"
-    r"\s*[:=]\s*(?:(?P<quote>[\"'`])(?P<quoted_value>[^\r\n]*?)(?P=quote)|(?P<config_value>\$\{[^}\r\n]+\}|#\{[^}\r\n]+\}|\{\{[^}\r\n]+\}\}|%[A-Z_][A-Z0-9_]*%|\$[A-Z_][A-Z0-9_]*)|(?P<value>[^\"'`,\s}\\)]+))",
+    r"[ \t]*[:=][ \t]*(?:(?P<quote>[\"'`])(?P<quoted_value>[^\r\n]*?)(?P=quote)|(?P<config_value>\$\{[^}\r\n]+\}|#\{[^}\r\n]+\}|\{\{[^}\r\n]+\}\}|%[A-Z_][A-Z0-9_]*%|\$[A-Z_][A-Z0-9_]*)|(?P<value>[^\"'`,\s}\\)]+))",
     re.I,
 )
 CLIENT_ID_ASSIGNMENT_RE = re.compile(
     r"\b(?P<key>[\w.-]*(?:client[_-]?id|clientId)[\w.-]*)\b"
-    r"\s*[:=]\s*(?:(?P<quote>[\"'`])(?P<quoted_value>[^\r\n]*?)(?P=quote)|(?P<config_value>\$\{[^}\r\n]+\}|#\{[^}\r\n]+\}|\{\{[^}\r\n]+\}\}|%[A-Z_][A-Z0-9_]*%|\$[A-Z_][A-Z0-9_]*)|(?P<value>[^\"'`,\s}\\)]+))",
+    r"[ \t]*[:=][ \t]*(?:(?P<quote>[\"'`])(?P<quoted_value>[^\r\n]*?)(?P=quote)|(?P<config_value>\$\{[^}\r\n]+\}|#\{[^}\r\n]+\}|\{\{[^}\r\n]+\}\}|%[A-Z_][A-Z0-9_]*%|\$[A-Z_][A-Z0-9_]*)|(?P<value>[^\"'`,\s}\\)]+))",
     re.I,
 )
 TOKEN_METRIC_ASSIGNMENT_RE = re.compile(
@@ -116,6 +145,18 @@ TOKEN_METRIC_ASSIGNMENT_RE = re.compile(
 NON_SECRET_TOKEN_KEY_RE = re.compile(
     r"(?:^|[_\-.])(?:token|tokens)?(?:count|counts|usage|used|limit|budget|remaining|total|prompt|completion|input|output|cached|reasoning|byday|bydate|daily|monthly|estimate|estimated|created|created_at|expires|resolved|el)(?:s|tokens)?(?:$|[_\-.])|"
     r"(?:prompt|completion|input|output|total|cached|reasoning|usage|count|counts|limit|budget|remaining|byday|bydate|daily|monthly|estimate|estimated|created|expires|resolved).*tokens?",
+    re.I,
+)
+# Compound identifiers that happen to contain a sensitive substring (token,
+# secret, auth, password, key) as part of an unrelated English word, not as a
+# standalone "secret-like" variable name. Without this, `token` matches inside
+# `tokenizer`/`tokenize`, `secret` inside `secretary`, etc. -- flagging things
+# like `cls.tokenizer = ...` as if it were a credential assignment. This is a
+# secondary/defense-in-depth check on top of the file-type-aware unquoted-
+# value rule below, since compound words can theoretically show up in .env/
+# .yaml files too.
+NON_SECRET_COMPOUND_KEY_RE = re.compile(
+    r"(?:token(?:s)?(?:izer|ize[rd]?|ization|izing)|secretar(?:y|iat)|passwordless)",
     re.I,
 )
 NON_SECRET_URI_KEY_RE = re.compile(r"(?:uri|url|endpoint|host|domain|issuer|audience)$", re.I)
@@ -344,7 +385,7 @@ def safe_extract_tar(archive_path, extract_dir, findings):
 
         safe_members = [
             member for member in members
-            if not member.issym() and not member.islnk() and not is_self_referential_entry(member.name)
+            if (member.isfile() or member.isdir()) and not is_self_referential_entry(member.name)
         ]
 
         total_declared = sum(member.size for member in safe_members if member.isfile())
@@ -420,6 +461,22 @@ def should_read_as_text(file_path):
     return file_path.suffix.lower() in TEXT_EXTENSIONS or file_path.name.lower() in {"requirements.txt", "pipfile", "license", "copying"} or file_path.name.lower().startswith(".env")
 
 
+def line_number_for_offset(text, offset):
+    """1-indexed line number for a character offset into text."""
+    return text.count("\n", 0, offset) + 1
+
+
+def line_text_at_offset(text, offset):
+    """The full source line (trimmed) containing the given character offset,
+    used to show *where* a match sits -- e.g. the variable/field name it was
+    assigned to -- without needing a second file read."""
+    line_start = text.rfind("\n", 0, offset) + 1
+    line_end = text.find("\n", offset)
+    if line_end == -1:
+        line_end = len(text)
+    return text[line_start:line_end].strip()
+
+
 def scan_secrets(files, extract_dir, findings):
     scanned = 0
     false_positives = []
@@ -437,11 +494,16 @@ def scan_secrets(files, extract_dir, findings):
             known_secret_spans.extend((match.start(), match.end()) for match in pattern_matches)
             if matches:
                 sample = matches[0] if isinstance(matches[0], str) else str(matches[0])
+                first_match = pattern_matches[0]
+                match_lines = sorted({line_number_for_offset(text, m.start()) for m in pattern_matches})
                 add_finding(findings, severity, "Secret scanning", f"{name} detected in packaged text content.", {
                     "file": rel,
+                    "line": match_lines[0],
+                    "lines": match_lines[:50],
                     "matchCount": len(matches),
                     "classification": "TRUE_POSITIVE",
                     "confidence": "high",
+                    "context": redact_text(line_text_at_offset(text, first_match.start()))[:200],
                     "sample": redact_text(sample)[:160],
                 })
         sensitive_matches = list(SENSITIVE_ASSIGNMENT_RE.finditer(text))
@@ -454,6 +516,7 @@ def scan_secrets(files, extract_dir, findings):
                 needs_review.append(analysis)
             add_finding(findings, analysis["severity"], "Secret scanning", analysis["details"], {
                 "file": rel,
+                "line": analysis["line"],
                 "matchCount": 1,
                 "classification": analysis["classification"],
                 "confidence": analysis["confidence"],
@@ -468,6 +531,7 @@ def scan_secrets(files, extract_dir, findings):
             if not analysis:
                 continue
             analysis["file"] = rel
+            analysis["line"] = line_number_for_offset(text, match.start())
             if analysis["classification"] == "FALSE_POSITIVE":
                 false_positives.append(analysis)
             elif analysis["classification"] == "NEEDS_REVIEW":
@@ -480,9 +544,10 @@ def scan_secrets(files, extract_dir, findings):
                     client_secret_analyses.append(analysis)
                 sensitive_assignments.append(analysis)
         for match in CLIENT_ID_ASSIGNMENT_RE.finditer(text):
-            analysis = analyze_client_id_assignment(match.group("key"), assignment_match_value(match), match.group(0))
+            analysis = analyze_client_id_assignment(match.group("key"), assignment_match_value(match), match.group(0), match.group("quote"), rel)
             if analysis:
                 analysis["file"] = rel
+                analysis["line"] = line_number_for_offset(text, match.start())
                 client_id_analyses.append(analysis)
         if client_id_analyses and client_secret_analyses:
             client_pair = client_id_analyses[0]
@@ -494,6 +559,7 @@ def scan_secrets(files, extract_dir, findings):
                 "key": client_pair["key"],
                 "sample": client_pair["sample"],
                 "file": rel,
+                "line": client_pair["line"],
             })
         by_assignment_type = {}
         for analysis in sensitive_assignments:
@@ -508,8 +574,11 @@ def scan_secrets(files, extract_dir, findings):
                 details = "Ambiguous secret-like assignment needs review."
             elif assignment_key:
                 details = f"Possible secret-like assignment detected for `{assignment_key}`."
+            match_lines = sorted({a["line"] for a in analyses if a.get("line")})
             add_finding(findings, severity, "Secret scanning", details, {
                 "file": rel,
+                "line": match_lines[0] if match_lines else None,
+                "lines": match_lines[:50],
                 "matchCount": len(analyses),
                 "key": sample["key"],
                 "classification": classification,
@@ -524,6 +593,7 @@ def scan_secrets(files, extract_dir, findings):
         "falsePositives": [
             {
                 "file": item["file"],
+                "line": item.get("line"),
                 "key": item["key"],
                 "classification": item["classification"],
                 "reason": item["reason"],
@@ -604,6 +674,7 @@ def scan_generic_secret_literals(text, rel, known_secret_spans):
             "key": "literal",
             "sample": context.strip(),
             "file": rel,
+            "line": line_number_for_offset(text, match.start()),
         })
     return analyses
 
@@ -618,6 +689,16 @@ def is_code_reference_value(value):
         or FRONTEND_REFERENCE_RE.search(text)
         or RUNTIME_VALUE_REFERENCE_RE.search(text)
         or re.fullmatch(r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+", text)
+        # A dotted identifier chain immediately followed by "(" -- e.g.
+        # `tiktok.getEncoding(` or `cls.estimate_token(rules` -- is the start
+        # of a function/method call, not a literal value. This shape shows up
+        # because the value-capture group in SENSITIVE_ASSIGNMENT_RE excludes
+        # the closing ")" (and any quote), so `foo.bar("x")` gets truncated to
+        # `foo.bar(` and `foo.bar(x)` gets truncated to `foo.bar(x`. Match on
+        # the *prefix* (identifier chain + open paren) rather than requiring
+        # the whole captured text to be just that prefix, so both truncation
+        # shapes -- with or without a captured argument -- are recognized.
+        or re.match(r"^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\(", text)
     )
 
 
@@ -646,9 +727,11 @@ def classified_false_positive(key, sample, reason):
     }
 
 
-def analyze_client_id_assignment(key, value, sample):
+def analyze_client_id_assignment(key, value, sample, quote="", source_file=""):
     value_text = str(value or "").strip().strip("\"'`;")
     if not value_text:
+        return None
+    if not quote and not is_literal_value_file(source_file) and not re.fullmatch(r"[+-]?\d+(?:\.\d+)?|true|false|null|none|nil|undefined", value_text, re.I):
         return None
     if (
         PLACEHOLDER_SECRET_RE.fullmatch(value_text)
@@ -688,6 +771,16 @@ def analyze_sensitive_assignment(key, value, sample, quote="", source_file=""):
     value_lower = value_text.lower()
     if not value_text:
         return None
+    if not quote and not is_literal_value_file(source_file) and not re.fullmatch(r"[+-]?\d+(?:\.\d+)?|true|false|null|none|nil|undefined", value_text, re.I):
+        # Unquoted right-hand side in a real source file (not .env/.yaml/
+        # .properties/etc). String literals must be quoted in every language
+        # this scanner supports, so an unquoted RHS here can only be a
+        # variable reference, function/method call, computed expression, or
+        # a bare number/boolean/null -- never a hardcoded secret string.
+        # This replaces trying to enumerate every possible "this is code"
+        # shape (dotted calls, multi-arg calls, ternaries, f-strings, etc.)
+        # with one general rule based on what the value even *can* be.
+        return classified_false_positive(key_text, sample, "Unquoted value in a source file is a code expression (variable, function call, or similar), not a hardcoded string literal.")
     if CONFIG_REFERENCE_FRAGMENT_RE.search(sample):
         return classified_false_positive(key_text, sample, "Configuration/property reference, not a hardcoded literal secret.")
     if is_documentation_or_rule_file(source_file) and re.search(r"(?<![A-Za-z0-9])secret123(?![A-Za-z0-9])", value_text, re.I):
@@ -704,6 +797,8 @@ def analyze_sensitive_assignment(key, value, sample, quote="", source_file=""):
         return classified_false_positive(key_text, sample, "Token accounting or usage metadata, not a secret value.")
     if "token" in key_lower and NON_SECRET_TOKEN_KEY_RE.search(key_lower):
         return classified_false_positive(key_text, sample, "Variable name is token metadata/counter state.")
+    if NON_SECRET_COMPOUND_KEY_RE.search(key_lower):
+        return classified_false_positive(key_text, sample, "Sensitive substring is part of an unrelated identifier (e.g. tokenizer, secretary), not a credential variable.")
     if key_lower in {"max_tokens", "max-token", "maxtokens", "resolved_tokens", "resolvedtokens"}:
         return classified_false_positive(key_text, sample, "Token limit/accounting parameter, not a credential.")
     if key_lower.endswith(".access_token") and not re.search(r"[\"'][A-Za-z0-9._~+/=-]{16,}[\"']", sample):

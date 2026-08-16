@@ -124,7 +124,9 @@ def extract_artifact(artifact_path, extract_dir, artifact_type, findings=None):
                     {"entries": self_referential[:10], "skippedCount": len(self_referential)})
             safe_members = [
                 m for m in members
-                if is_safe_archive_entry(m.name) and not is_self_referential_entry(m.name)
+                if is_safe_archive_entry(m.name)
+                and (m.isfile() or m.isdir())
+                and not is_self_referential_entry(m.name)
             ]
             declared_total = sum(m.size for m in safe_members if m.isfile())
             if declared_total > MAX_EXTRACTED_BYTES:
