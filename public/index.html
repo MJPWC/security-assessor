@@ -140,6 +140,39 @@
         border-radius: 4px;
         background: var(--panel);
       }
+      .upload-zone {
+        border: 1px dashed #b8ada2;
+        border-radius: 4px;
+        background: var(--panel);
+        padding: 14px;
+      }
+      .upload-zone.is-dragging {
+        border-color: var(--accent-dark);
+        background: #fff7ef;
+      }
+      .upload-zone input[type="file"] {
+        margin-top: 8px;
+      }
+      .upload-zone-text {
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.4;
+      }
+      .status.is-loading::before {
+        content: "";
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        margin-right: 8px;
+        border: 2px solid #d7cabe;
+        border-top-color: var(--accent-dark);
+        border-radius: 50%;
+        vertical-align: -2px;
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
       .check-row {
         display: flex;
         align-items: center;
@@ -617,7 +650,10 @@
         </div>
         <div>
           <label for="artifact">Upload application package</label>
-          <input id="artifact" type="file" accept=".jar,.war,.zip,.tgz,.tar,.gz,.whl,.py,.js,.json">
+          <div class="upload-zone" id="upload-zone">
+            <div class="upload-zone-text" id="upload-zone-text">Drop a .jar, .war, .tar, .tgz, .zip, wheel, or source package here, or choose a file.</div>
+            <input id="artifact" type="file" accept=".jar,.war,.zip,.tgz,.tar,.gz,.whl,.py,.js,.json">
+          </div>
         </div>
         <div id="security-controls" class="stack">
         <button id="scan">Run Security Assessment</button>
@@ -739,6 +775,8 @@ cannot comply</textarea>
     </div>
     <script>
       const fileInput = document.getElementById('artifact');
+      const uploadZone = document.getElementById('upload-zone');
+      const uploadZoneText = document.getElementById('upload-zone-text');
       const securityModeButton = document.getElementById('security-mode-button');
       const qualityModeButton = document.getElementById('quality-mode-button');
       const securityControls = document.getElementById('security-controls');
@@ -873,6 +911,39 @@ cannot comply</textarea>
       function setStatus(message) {
         statusEl.textContent = message;
       }
+
+      function setLoading(isLoading, target = statusEl) {
+        target.classList.toggle('is-loading', Boolean(isLoading));
+      }
+
+      function updateUploadLabel() {
+        const file = fileInput.files && fileInput.files[0];
+        uploadZoneText.textContent = file
+          ? `Selected: ${file.name}`
+          : 'Drop a .jar, .war, .tar, .tgz, .zip, wheel, or source package here, or choose a file.';
+      }
+
+      fileInput.addEventListener('change', updateUploadLabel);
+      for (const eventName of ['dragenter', 'dragover']) {
+        uploadZone.addEventListener(eventName, event => {
+          event.preventDefault();
+          uploadZone.classList.add('is-dragging');
+        });
+      }
+      for (const eventName of ['dragleave', 'drop']) {
+        uploadZone.addEventListener(eventName, event => {
+          event.preventDefault();
+          uploadZone.classList.remove('is-dragging');
+        });
+      }
+      uploadZone.addEventListener('drop', event => {
+        const files = event.dataTransfer && event.dataTransfer.files;
+        if (!files || !files.length) return;
+        const transfer = new DataTransfer();
+        transfer.items.add(files[0]);
+        fileInput.files = transfer.files;
+        updateUploadLabel();
+      });
 
       function setDecision(value) {
         decisionEl.textContent = value || 'No assessment yet';
@@ -1414,14 +1485,15 @@ cannot comply</textarea>
           return;
         }
         scanButton.disabled = true;
-        reportEl.innerHTML = '<div class="report-empty">Scanning package...</div>';
+        setLoading(true);
+        reportEl.innerHTML = '<div class="report-empty">Extracting and scanning package...</div>';
         renderLinks();
         setDecision('Running');
         Object.values(counters).forEach(el => { el.textContent = '0'; });
         try {
           setStatus('Reading upload in browser...');
           const contentBase64 = arrayBufferToBase64(await file.arrayBuffer());
-          setStatus('Uploading and running checks...');
+          setStatus('Extracting archive, running scanners, and preparing LLM analysis...');
           const response = await fetch('/api/assess', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1452,6 +1524,7 @@ cannot comply</textarea>
           setStatus('Assessment failed. Check the selected package and try again.');
         } finally {
           scanButton.disabled = false;
+          setLoading(false);
         }
       });
 
@@ -1541,6 +1614,7 @@ cannot comply</textarea>
           return;
         }
         qualityButton.disabled = true;
+        setLoading(true, qualityStatusEl);
         reportEl.innerHTML = '<div class="report-empty">Running quality assessment...</div>';
         renderQualityLinks();
         setDecision('Running');
@@ -1585,6 +1659,7 @@ cannot comply</textarea>
           qualityStatusEl.textContent = 'Quality assessment failed. Check the selected package and try again.';
         } finally {
           qualityButton.disabled = false;
+          setLoading(false, qualityStatusEl);
         }
       });
     </script>

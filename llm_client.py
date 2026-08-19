@@ -8,7 +8,7 @@ import urllib.request
 from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent
-LLM_PROVIDER_SEQUENCE = ["anthropic_gateway", "anthropic", "groq", "openai", "gemini", "openrouter"]
+LLM_PROVIDER_SEQUENCE = ["anthropic_gateway", "groq", "openai", "gemini", "openrouter", "anthropic"]
 SENSITIVE_KEY_RE = re.compile(r"(api[_-]?key|apikey|token|secret|password|client[_-]?secret|clientSecret|authorization|x-api-key)", re.I)
 NON_SECRET_REPORT_KEYS = {
     "secretscan",
@@ -232,7 +232,12 @@ def join_url(base_url, path):
 
 
 def http_json(url, headers, body):
-    request = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
+    request_headers = {
+        "User-Agent": "Security-Assessor/1.0",
+        "Accept": "application/json",
+        **headers,
+    }
+    request = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=request_headers, method="POST")
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
             return json.loads(response.read().decode("utf-8"))
@@ -279,7 +284,7 @@ def chat_response_text(provider, data):
     return text
 
 
-def call_llm(messages, providers=None, config_label="LLM"):
+def call_llm(messages, providers=None, config_label="LLM", max_tokens=900):
     errors = []
     providers = provider_configs() if providers is None else providers
     if not providers:
@@ -294,7 +299,7 @@ def call_llm(messages, providers=None, config_label="LLM"):
                 data = http_json(
                     endpoint,
                     {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}", "anthropic-version": os.getenv("ANTHROPIC_API_VERSION", "2023-06-01")},
-                    {"model": model, "system": messages[0]["content"], "messages": messages[1:], "temperature": 0.2, "max_tokens": 900},
+                    {"model": model, "system": messages[0]["content"], "messages": messages[1:], "temperature": 0.2, "max_tokens": max_tokens},
                 )
                 return anthropic_response_text(provider, data)
             if provider == "anthropic":
@@ -302,7 +307,7 @@ def call_llm(messages, providers=None, config_label="LLM"):
                 data = http_json(
                     endpoint,
                     {"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": os.getenv("ANTHROPIC_API_VERSION", "2023-06-01")},
-                    {"model": model, "system": messages[0]["content"], "messages": messages[1:], "temperature": 0.2, "max_tokens": 900},
+                    {"model": model, "system": messages[0]["content"], "messages": messages[1:], "temperature": 0.2, "max_tokens": max_tokens},
                 )
                 return anthropic_response_text(provider, data)
             if provider == "gemini":
@@ -310,7 +315,7 @@ def call_llm(messages, providers=None, config_label="LLM"):
                 data = http_json(
                     f"{join_url(base_url, f'/v1beta/models/{model}:generateContent')}?key={api_key}",
                     {"Content-Type": "application/json"},
-                    {"contents": [{"role": "user", "parts": [{"text": "\n\n".join(message["content"] for message in messages)}]}], "generationConfig": {"temperature": 0.2, "maxOutputTokens": 900}},
+                    {"contents": [{"role": "user", "parts": [{"text": "\n\n".join(message["content"] for message in messages)}]}], "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_tokens}},
                 )
                 return gemini_response_text(provider, data)
             endpoint = join_url(os.getenv("OPENAI_BASE_URL", "https://api.openai.com"), "/v1/chat/completions")
@@ -319,7 +324,7 @@ def call_llm(messages, providers=None, config_label="LLM"):
                 endpoint = join_url(os.getenv("GROQ_BASE_URL", "https://api.groq.com"), "/openai/v1/chat/completions")
             if provider == "openrouter":
                 endpoint = join_url(os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"), "/chat/completions")
-            data = http_json(endpoint, headers, {"model": model, "messages": messages, "temperature": 0.2, "max_tokens": 900})
+            data = http_json(endpoint, headers, {"model": model, "messages": messages, "temperature": 0.2, "max_tokens": max_tokens})
             return chat_response_text(provider, data)
         except Exception as exc:
             errors.append(f"{provider}: {redact_text(str(exc))}")

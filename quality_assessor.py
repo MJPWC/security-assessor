@@ -20,6 +20,10 @@ MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 # upload received over the wire.
 MAX_EXTRACTED_BYTES = int(os.getenv("SECURITY_ASSESSOR_MAX_EXTRACTED_BYTES", str(500 * 1024 * 1024)))
 MAX_WALK_FILES = 3000
+MAX_LLM_QUALITY_FINDINGS = int(os.getenv("SECURITY_ASSESSOR_MAX_LLM_QUALITY_FINDINGS", "50"))
+MAX_LLM_QUALITY_SAMPLE_FILES = int(os.getenv("SECURITY_ASSESSOR_MAX_LLM_QUALITY_SAMPLE_FILES", "6"))
+MAX_LLM_QUALITY_SAMPLE_LINES = int(os.getenv("SECURITY_ASSESSOR_MAX_LLM_QUALITY_SAMPLE_LINES", "40"))
+MAX_LLM_QUALITY_SAMPLE_CHARS = int(os.getenv("SECURITY_ASSESSOR_MAX_LLM_QUALITY_SAMPLE_CHARS", "2500"))
 # A build package should never legitimately contain the assessor's own prior
 # run output. If it does, the upload was likely packaged from this app's own
 # working directory without excluding output/ -- skip those entries instead
@@ -807,7 +811,7 @@ def build_llm_quality_payload(result, files, root_dir):
             candidates.append(path)
     candidates.sort(key=lambda path: (source_file_priority(path), path.stat().st_size if path.exists() else 0, relative(path, root_dir)))
     samples = []
-    for path in candidates[:12]:
+    for path in candidates[:MAX_LLM_QUALITY_SAMPLE_FILES]:
         try:
             lines = path.read_text(errors="ignore").splitlines()
         except OSError:
@@ -815,7 +819,7 @@ def build_llm_quality_payload(result, files, root_dir):
         samples.append({
             "file": relative(path, root_dir),
             "lineCount": len(lines),
-            "sample": redact_text("\n".join(lines[:80]))[:6000],
+            "sample": redact_text("\n".join(lines[:MAX_LLM_QUALITY_SAMPLE_LINES]))[:MAX_LLM_QUALITY_SAMPLE_CHARS],
         })
     return {
         "artifact": result["artifact"],
@@ -823,7 +827,8 @@ def build_llm_quality_payload(result, files, root_dir):
         "score": result["score"],
         "metrics": result["metrics"],
         "findingCounts": result["findingCounts"],
-        "findings": result["findings"][:80],
+        "findings": result["findings"][:MAX_LLM_QUALITY_FINDINGS],
+        "omittedFindingCount": max(0, len(result["findings"]) - MAX_LLM_QUALITY_FINDINGS),
         "codeSamples": samples,
     }
 

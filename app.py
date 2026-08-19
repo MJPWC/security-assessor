@@ -25,6 +25,11 @@ from xml.sax.saxutils import escape
 
 from llm_client import call_llm, llm_status, redact_text, redact_value
 from quality_assessor import assess_quality
+from security_tools.common import dedupe_vulnerabilities
+from security_tools.dependency_check import run_dependency_check_scan
+from security_tools.java_analysis import analyze_java_bytecode
+from security_tools.llm_security import run_structured_security_llm
+from security_tools.trivy_scanner import run_trivy_scan
 
 APP_DIR = Path(__file__).resolve().parent
 PUBLIC_DIR = APP_DIR / "public"
@@ -59,6 +64,7 @@ TEXT_FILE_LIMIT_BYTES = int(os.getenv("SECURITY_ASSESSOR_TEXT_FILE_LIMIT_BYTES",
 MAX_WALK_FILES = int(os.getenv("SECURITY_ASSESSOR_MAX_WALK_FILES", "3000"))
 MAX_PROMPT_FILE_BYTES = int(os.getenv("SECURITY_ASSESSOR_MAX_PROMPT_FILE_BYTES", str(1024 * 1024)))
 MAX_PROMPTS_PER_RUN = int(os.getenv("SECURITY_ASSESSOR_MAX_PROMPTS_PER_RUN", "250"))
+DELETE_RAW_FILES_AFTER_RUN = (os.getenv("SECURITY_ASSESSOR_DELETE_RAW_FILES_AFTER_RUN") or "").strip().lower() in {"1", "true", "yes"}
 # A build package should never legitimately contain the assessor's own run
 # output. If it does, it's a strong signal the upload was packaged from this
 # app's own working directory without excluding output/ -- which is exactly
@@ -115,6 +121,18 @@ KEYSTORE_EXTENSIONS = {".jks", ".keystore", ".p12", ".pfx"}
 PRIVATE_KEY_EXTENSIONS = {".key"}
 WEAK_CERT_SIGNATURE_RE = re.compile(r"Signature Algorithm:\s*(?:md5|sha1)", re.I)
 
+
+def is_loopback_url(value):
+    try:
+        host = (urllib.parse.urlparse(str(value or "")).hostname or "").lower()
+    except ValueError:
+        return False
+    return host in {"localhost", "::1", "0.0.0.0"} or host.startswith("127.")
+
+
+def remove_loopback_urls(value):
+    return URL_RE.sub(lambda match: "" if is_loopback_url(match.group(0)) else match.group(0), str(value or ""))
+
 SECRET_PATTERNS = [
     ("OpenAI API key", "critical", re.compile(r"sk-(?:proj|svcacct)?-[A-Za-z0-9_-]{20,}")),
     ("Anthropic API key", "critical", re.compile(r"sk-ant-api[0-9a-z_-]*-[A-Za-z0-9_-]{20,}")),
@@ -157,6 +175,11 @@ NON_SECRET_TOKEN_KEY_RE = re.compile(
 # .yaml files too.
 NON_SECRET_COMPOUND_KEY_RE = re.compile(
     r"(?:token(?:s)?(?:izer|ize[rd]?|ization|izing)|secretar(?:y|iat)|passwordless)",
+    re.I,
+)
+NON_SECRET_STORAGE_KEY_RE = re.compile(
+    r"(?:^|[_\-.])(?:local|session)?[_\-.]*(?:storage|storeage|store|cache|cookie)[_\-.]*(?:key|name|id)s?(?:$|[_\-.])|"
+    r"(?:^|[_\-.])(?:key|name|id)[_\-.]*(?:for[_\-.]*)?(?:local|session)?[_\-.]*(?:storage|storeage|store|cache|cookie)(?:$|[_\-.])",
     re.I,
 )
 NON_SECRET_URI_KEY_RE = re.compile(r"(?:uri|url|endpoint|host|domain|issuer|audience)$", re.I)
@@ -795,6 +818,8 @@ def analyze_sensitive_assignment(key, value, sample, quote="", source_file=""):
         return classified_false_positive(key_text, sample, "Runtime request/session/config lookup, not a hardcoded literal secret.")
     if TOKEN_METRIC_ASSIGNMENT_RE.search(sample):
         return classified_false_positive(key_text, sample, "Token accounting or usage metadata, not a secret value.")
+    if NON_SECRET_STORAGE_KEY_RE.search(key_lower):
+        return classified_false_positive(key_text, sample, "Storage/cache/cookie key name, not a credential value.")
     if "token" in key_lower and NON_SECRET_TOKEN_KEY_RE.search(key_lower):
         return classified_false_positive(key_text, sample, "Variable name is token metadata/counter state.")
     if NON_SECRET_COMPOUND_KEY_RE.search(key_lower):
@@ -1117,7 +1142,7 @@ def scan_configuration_security(files, extract_dir, findings):
             continue
         config_files.append(rel)
         text = file_path.read_text(errors="ignore")
-        urls = [url for url in URL_RE.findall(text) if DEV_ENV_RE.search(url)]
+        urls = [url for url in URL_RE.findall(text) if DEV_ENV_RE.search(url) and not is_loopback_url(url)]
         if urls:
             hardcoded_urls.append({"file": rel, "urls": urls[:5]})
         for idx, line in enumerate(text.splitlines(), start=1):
@@ -1126,7 +1151,8 @@ def scan_configuration_security(files, extract_dir, findings):
                 unsafe_defaults.append({"file": rel, "line": idx, "setting": line.strip()[:160]})
             if re.search(r"\b(tls|ssl|verify|certificate|rejectunauthorized)\b.*\b(false|0|off|disabled)\b", lowered):
                 unsafe_defaults.append({"file": rel, "line": idx, "setting": line.strip()[:160]})
-            if DEV_ENV_RE.search(line) and not line.lstrip().startswith("#"):
+            line_without_loopback_urls = remove_loopback_urls(line)
+            if DEV_ENV_RE.search(line_without_loopback_urls) and not line.lstrip().startswith("#"):
                 dev_references.append({"file": rel, "line": idx, "text": line.strip()[:160]})
     if hardcoded_urls:
         add_finding(findings, "medium", "Configuration security", "Environment-specific or non-production URLs were found in packaged config.", {
@@ -1391,6 +1417,60 @@ def run_pip_audit_if_possible(extract_dir, findings):
         "vulnerabilityCount": total_vulnerabilities,
     }
 
+
+def add_external_vulnerability_findings(vulnerabilities, findings):
+    for vuln in vulnerabilities or []:
+        scanner = vuln.get("scanner") or "external-scanner"
+        vuln_id = vuln.get("cve_id") or "unknown vulnerability"
+        component = vuln.get("component") or "unknown component"
+        severity = vuln.get("severity") if vuln.get("severity") in SEVERITY_RANK else "medium"
+        add_finding(
+            findings,
+            severity,
+            "Known vulnerability scan",
+            f"{scanner} reported {vuln_id} for {component}.",
+            {
+                "scanner": scanner,
+                "vulnerability": vuln_id,
+                "component": component,
+                "version": vuln.get("version"),
+                "fixedVersion": vuln.get("fixed_version"),
+                "file": vuln.get("file_location"),
+                "description": vuln.get("description"),
+            },
+        )
+
+
+def add_java_analysis_findings(java_analysis, findings):
+    if not java_analysis:
+        return
+    class_count = java_analysis.get("classFileCount", 0)
+    decompile = java_analysis.get("decompile") or {}
+    if class_count and not decompile.get("attempted"):
+        add_finding(
+            findings,
+            "info",
+            "Java bytecode analysis",
+            "Java class files were found, but source decompilation was not run.",
+            {
+                "classFileCount": class_count,
+                "reason": decompile.get("error") or "CFR decompiler not configured",
+                "examples": (java_analysis.get("classFiles") or [])[:10],
+            },
+        )
+    elif decompile.get("attempted") and not decompile.get("ok"):
+        add_finding(
+            findings,
+            "medium",
+            "Java bytecode analysis",
+            "Java class decompilation was attempted but did not complete successfully.",
+            {
+                "classFileCount": class_count,
+                "tool": decompile.get("tool"),
+                "error": decompile.get("error"),
+            },
+        )
+
 def decision_for(findings):
     worst = max([SEVERITY_RANK.get(item["severity"], 0) for item in findings] or [0])
     if worst >= SEVERITY_RANK["critical"]:
@@ -1425,6 +1505,7 @@ def security_report_card(assessment):
     findings = assessment.get("findings") or []
     npm_vulns = (assessment.get("npmAudit") or {}).get("vulnerabilityCount", 0) or 0
     pip_vulns = (assessment.get("pipAudit") or {}).get("vulnerabilityCount", 0) or 0
+    external_vulns = len(assessment.get("externalVulnerabilities") or [])
     cert_files = len((assessment.get("certificateScan") or {}).get("certificateFiles") or [])
     dependency_risk = assessment.get("dependencyRisk") or {}
     license_review = assessment.get("licenseReview") or {}
@@ -1438,9 +1519,9 @@ def security_report_card(assessment):
         },
         {
             "area": "Dependency risk",
-            "score": max(0, score_from_findings(findings, {"Known vulnerability scan", "Dependency risk", "Dependency inventory"}) - min(30, (npm_vulns + pip_vulns) * 5)),
+            "score": max(0, score_from_findings(findings, {"Known vulnerability scan", "Dependency risk", "Dependency inventory"}) - min(30, (npm_vulns + pip_vulns + external_vulns) * 5)),
             "status": "",
-            "detail": f"{len(assessment.get('components') or [])} component(s), {npm_vulns + pip_vulns} known vulnerability item(s).",
+            "detail": f"{len(assessment.get('components') or [])} component(s), {npm_vulns + pip_vulns + external_vulns} known vulnerability item(s).",
         },
         {
             "area": "Certificate/TLS",
@@ -1472,7 +1553,7 @@ def security_report_card(assessment):
     return cards
 
 
-def create_sbom(artifact, components):
+def create_sbom(artifact, components, vulnerabilities=None):
     return {
         "bomFormat": "CycloneDX-lite",
         "specVersion": "1.5",
@@ -1498,6 +1579,22 @@ def create_sbom(artifact, components):
             }
             for item in components
         ],
+        "vulnerabilities": [
+            {
+                "id": item.get("cve_id") or item.get("component") or "unknown",
+                "source": {"name": item.get("scanner", "external-scanner")},
+                "ratings": [{"severity": item.get("severity", "info")}],
+                "affects": [{"ref": item.get("component", "unknown")}],
+                "description": item.get("description", ""),
+                "properties": [
+                    {"name": "component", "value": item.get("component", "")},
+                    {"name": "version", "value": item.get("version", "")},
+                    {"name": "fixedVersion", "value": item.get("fixed_version", "")},
+                    {"name": "fileLocation", "value": item.get("file_location", "")},
+                ],
+            }
+            for item in (vulnerabilities or [])
+        ],
     }
 
 
@@ -1507,6 +1604,8 @@ def run_llm_review(assessment):
         "decision": assessment["decision"],
         "findingCounts": assessment["findingCounts"],
         "findings": assessment["findings"],
+        "externalVulnerabilities": assessment.get("externalVulnerabilities", [])[:80],
+        "javaAnalysis": assessment.get("javaAnalysis"),
         "dependencySample": assessment["components"][:60],
         "certificateScan": assessment.get("certificateScan"),
         "dependencyRisk": assessment.get("dependencyRisk"),
@@ -1514,6 +1613,9 @@ def run_llm_review(assessment):
         "configurationSecurity": assessment.get("configurationSecurity"),
         "npmAudit": assessment.get("npmAudit"),
         "pipAudit": assessment.get("pipAudit"),
+        "trivyScan": {key: value for key, value in (assessment.get("trivyScan") or {}).items() if key != "vulnerabilities"},
+        "dependencyCheck": {key: value for key, value in (assessment.get("dependencyCheck") or {}).items() if key != "vulnerabilities"},
+        "llmStructuredReview": assessment.get("llmStructuredReview"),
     })
     try:
         return redact_text(call_llm([
@@ -1539,7 +1641,8 @@ def run_quality_llm_review(payload):
                     "## Action Table\n"
                     "A Markdown table with these exact columns: "
                     "Finding | File/Line | Severity | Why It Matters | Suggested Fix Direction | Priority (1-5). "
-                    "Include one row for every distinct finding provided. Do not omit any finding. "
+                    "Include one row for every distinct finding provided in the payload. If omittedFindingCount is greater than 0, "
+                    "add one final row summarizing that additional lower-priority findings were omitted from the LLM context. "
                     "Priority 1 means fix before release, 5 means safe to defer. "
                     "Every Suggested Fix Direction cell must name a concrete action "
                     "(for example: 'move key to environment variable', 'add null check before accessing X', "
@@ -1560,7 +1663,7 @@ def run_quality_llm_review(payload):
                     + json.dumps(safe_payload, indent=2)
                 ),
             },
-        ], config_label="Quality LLM"))
+        ], config_label="Quality LLM", max_tokens=600))
     except Exception as exc:
         status = llm_status()
         providers = status.get("providers") or []
@@ -2389,8 +2492,11 @@ def build_markdown_report(assessment):
         "| Configuration security | Checks packaged config for unsafe defaults and environment-specific endpoints. | Completed |",
         f"| npm vulnerability scan | Runs npm audit for every package.json + package-lock.json pair found, including nested client apps. | {'Completed' if assessment['npmAudit']['attempted'] else 'Not applicable'} |",
         f"| Python vulnerability scan | Runs pip-audit for requirements.txt and pyproject.toml targets. | {'Completed' if assessment['pipAudit']['attempted'] else 'Not applicable'} |",
+        f"| Trivy filesystem scan | Runs Trivy against the extracted artifact when the trivy CLI is installed. | {'Completed' if assessment.get('trivyScan', {}).get('attempted') else 'Not installed'} |",
+        f"| OWASP Dependency-Check | Runs Dependency-Check against extracted Java/package evidence when installed. | {'Completed' if assessment.get('dependencyCheck', {}).get('attempted') else 'Not installed'} |",
+        f"| Java bytecode analysis | Inventories .class files and optionally decompiles JAR/WAR bytecode with CFR. | {'Completed' if assessment.get('javaAnalysis') else 'Not applicable'} |",
         "| SBOM generation | Generates a CycloneDX-lite JSON dependency inventory. | Completed |",
-        "| LLM security review | Sends only redacted findings metadata to the configured backend LLM. | Completed |",
+        "| Structured LLM security review | Sends redacted findings plus selected critical file snippets to the configured backend LLM. | Completed |",
         "",
         "## Finding Summary",
         "",
@@ -2463,6 +2569,58 @@ def build_markdown_report(assessment):
     else:
         lines.append(f"| Not applicable |  | {assessment['pipAudit'].get('reason', 'No Python audit targets found')} | 0 |")
 
+    java_analysis = assessment.get("javaAnalysis") or {}
+    decompile = java_analysis.get("decompile") or {}
+    lines.extend([
+        "",
+        "## Java Bytecode Analysis",
+        "",
+        f"- Class files found: {java_analysis.get('classFileCount', 0)}",
+        f"- Nested JAR/WAR files found: {java_analysis.get('nestedJarCount', 0)}",
+        f"- Decompile attempted: {decompile.get('attempted', False)}",
+        f"- Decompiled Java files: {decompile.get('javaFileCount', 0)}",
+    ])
+    if decompile.get("error"):
+        lines.append(f"- Decompile note: {decompile.get('error')}")
+    class_examples = java_analysis.get("classFiles") or []
+    if class_examples:
+        lines.extend(["", "| Class file examples |", "| --- |"])
+        for item in class_examples[:25]:
+            lines.append(f"| {item} |")
+
+    lines.extend([
+        "",
+        "## External Scanner Results",
+        "",
+        "| Scanner | Attempted | Status | Vulnerabilities | Note |",
+        "| --- | --- | --- | ---: | --- |",
+    ])
+    for scanner_name, scanner_payload in [
+        ("Trivy", assessment.get("trivyScan") or {}),
+        ("OWASP Dependency-Check", assessment.get("dependencyCheck") or {}),
+    ]:
+        attempted = scanner_payload.get("attempted", False)
+        status = "Completed" if scanner_payload.get("ok") else "Skipped" if not attempted else "Failed"
+        note = scanner_payload.get("reason") or scanner_payload.get("error") or ""
+        lines.append(f"| {scanner_name} | {attempted} | {status} | {scanner_payload.get('vulnerabilityCount', 0) or 0} | {str(note)[:180]} |")
+
+    external_vulnerabilities = assessment.get("externalVulnerabilities") or []
+    lines.extend([
+        "",
+        "## Normalized External Vulnerabilities",
+        "",
+        "| Scanner | CVE/ID | Severity | Component | Version | Fixed Version | Location |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
+    ])
+    if external_vulnerabilities:
+        for item in external_vulnerabilities[:150]:
+            lines.append(
+                f"| {item.get('scanner', '')} | {item.get('cve_id', '')} | {item.get('severity', '')} | "
+                f"{item.get('component', '')} | {item.get('version', '')} | {item.get('fixed_version', '')} | {item.get('file_location', '')} |"
+            )
+    else:
+        lines.append("| None |  |  |  |  |  |  |")
+
     certificate_scan = assessment.get("certificateScan") or {}
     lines.extend([
         "",
@@ -2505,7 +2663,43 @@ def build_markdown_report(assessment):
     ])
     lines.extend([
         "",
-        "## LLM Review",
+        "## Structured LLM Security Review",
+        "",
+    ])
+    structured = assessment.get("llmStructuredReview") or {}
+    if structured.get("score"):
+        lines.append(f"LLM security score: {structured.get('score')}/100")
+        lines.append("")
+    if structured.get("summary"):
+        lines.append(str(structured.get("summary")))
+    llm_items = structured.get("findings") or structured.get("vulnerabilities") or []
+    if llm_items:
+        lines.extend([
+            "",
+            "| Finding | Severity | Confidence | File | Risk | Fix |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ])
+        for item in llm_items[:60]:
+            title = item.get("title") or item.get("vulnerability_name") or ""
+            file_location = item.get("file") or item.get("file_location") or ""
+            risk = item.get("description") or item.get("risk_explanation") or ""
+            fix = item.get("fix") or item.get("remediation_code") or ""
+            lines.append(
+                f"| {str(title)[:120]} | {item.get('severity', '')} | {item.get('confidence', '')} | "
+                f"{file_location} | {str(risk)[:260]} | {str(fix)[:260]} |"
+            )
+    elif structured.get("error"):
+        lines.append("Structured LLM review unavailable: " + str(structured.get("error")))
+    else:
+        lines.append("No structured LLM vulnerabilities were returned.")
+    selected_files = structured.get("selectedFiles") or []
+    if selected_files:
+        lines.extend(["", "### Critical Files Selected For LLM", "", "| File | Reasons |", "| --- | --- |"])
+        for item in selected_files[:30]:
+            lines.append(f"| {item.get('file', '')} | {', '.join(item.get('reasons') or [])} |")
+    lines.extend([
+        "",
+        "## Narrative LLM Review",
         "",
         assessment["llmReview"],
         "",
@@ -2643,6 +2837,84 @@ def pip_audit_rows(pip_audit):
     return rows
 
 
+def external_scanner_rows(assessment):
+    rows = [style_header(["Scanner", "Attempted", "Status", "Vulnerabilities", "Note"])]
+    for scanner_name, scanner_payload in [
+        ("Trivy", assessment.get("trivyScan") or {}),
+        ("OWASP Dependency-Check", assessment.get("dependencyCheck") or {}),
+    ]:
+        attempted = scanner_payload.get("attempted", False)
+        status = "Completed" if scanner_payload.get("ok") else "Skipped" if not attempted else "Failed"
+        rows.append([
+            scanner_name,
+            attempted,
+            status,
+            scanner_payload.get("vulnerabilityCount", 0) or 0,
+            scanner_payload.get("reason") or scanner_payload.get("error") or "",
+        ])
+    return rows
+
+
+def external_vulnerability_rows(vulnerabilities):
+    rows = [style_header(["Scanner", "CVE/ID", "Severity", "Component", "Version", "Fixed Version", "Location", "Description"])]
+    for item in vulnerabilities or []:
+        rows.append([
+            item.get("scanner", ""),
+            item.get("cve_id", ""),
+            item.get("severity", ""),
+            item.get("component", ""),
+            item.get("version", ""),
+            item.get("fixed_version", ""),
+            item.get("file_location", ""),
+            item.get("description", ""),
+        ])
+    if len(rows) == 1:
+        rows.append(["None", "", "", "", "", "", "", "No external scanner vulnerabilities were found or scanners were unavailable."])
+    return rows
+
+
+def java_analysis_rows(java_analysis):
+    java_analysis = java_analysis or {}
+    decompile = java_analysis.get("decompile") or {}
+    rows = [
+        style_header(["Metric", "Value"]),
+        ["Class files found", java_analysis.get("classFileCount", 0)],
+        ["Nested JAR/WAR files found", java_analysis.get("nestedJarCount", 0)],
+        ["Decompile attempted", decompile.get("attempted", False)],
+        ["Decompile status", "Completed" if decompile.get("ok") else "Skipped/failed"],
+        ["Decompiled Java files", decompile.get("javaFileCount", 0)],
+        ["Decompiler note", decompile.get("error", "")],
+    ]
+    for item in (java_analysis.get("classFiles") or [])[:100]:
+        rows.append(["Class file", item])
+    return rows
+
+
+def structured_llm_rows(structured):
+    structured = structured or {}
+    rows = [
+        style_header(["Field", "Value"]),
+        ["Score", structured.get("score", "")],
+        ["Summary", structured.get("summary", "")],
+        ["Error", structured.get("error", "")],
+        [],
+        style_header(["Finding", "Severity", "Confidence", "File", "Risk", "Fix"]),
+    ]
+    for item in (structured.get("findings") or structured.get("vulnerabilities") or []):
+        rows.append([
+            item.get("title") or item.get("vulnerability_name", ""),
+            item.get("severity", ""),
+            item.get("confidence", ""),
+            item.get("file") or item.get("file_location", ""),
+            item.get("description") or item.get("risk_explanation", ""),
+            item.get("fix") or item.get("remediation_code", ""),
+        ])
+    rows.extend([[], style_header(["Selected File", "Reasons"])])
+    for item in structured.get("selectedFiles") or []:
+        rows.append([item.get("file", ""), ", ".join(item.get("reasons") or [])])
+    return rows
+
+
 def security_readiness_rows(assessment):
     dependency_risk = assessment.get("dependencyRisk") or {}
     license_review = assessment.get("licenseReview") or {}
@@ -2715,6 +2987,10 @@ def build_xlsx_report(assessment):
         ["Configuration security", "Completed"],
         ["npm audit", "Completed" if assessment["npmAudit"].get("attempted") else "Not applicable"],
         ["pip-audit", "Completed" if assessment["pipAudit"].get("attempted") else "Not applicable"],
+        ["Trivy", "Completed" if assessment.get("trivyScan", {}).get("attempted") else "Not installed"],
+        ["OWASP Dependency-Check", "Completed" if assessment.get("dependencyCheck", {}).get("attempted") else "Not installed"],
+        ["Java bytecode analysis", "Completed"],
+        ["Structured LLM security review", "Completed"],
         ["SBOM generation", "Completed"],
     ])
     sheets = [
@@ -2727,6 +3003,10 @@ def build_xlsx_report(assessment):
         ("Security Readiness", security_readiness_rows(assessment), [28, 42, 90]),
         ("npm Audit", npm_audit_rows(assessment["npmAudit"]), [36, 18, 18, 60]),
         ("Python Audit", pip_audit_rows(assessment["pipAudit"]), [36, 48, 18, 18, 18, 60]),
+        ("External Scanners", external_scanner_rows(assessment), [28, 18, 18, 18, 90]),
+        ("External Vulnerabilities", external_vulnerability_rows(assessment.get("externalVulnerabilities") or []), [18, 24, 14, 42, 20, 24, 50, 90]),
+        ("Java Analysis", java_analysis_rows(assessment.get("javaAnalysis") or {}), [28, 90]),
+        ("Structured LLM", structured_llm_rows(assessment.get("llmStructuredReview") or {}), [32, 90, 18, 80, 80]),
     ]
     content_types = [
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
@@ -2794,6 +3074,24 @@ def make_run_id():
     return f"run_{stamp}_{uuid.uuid4().hex[:8]}"
 
 
+def cleanup_raw_run_files(upload_dir, extract_dir):
+    cleanup = {
+        "enabled": DELETE_RAW_FILES_AFTER_RUN,
+        "removed": [],
+        "errors": [],
+    }
+    if not DELETE_RAW_FILES_AFTER_RUN:
+        return cleanup
+    for path in [upload_dir, extract_dir]:
+        try:
+            if path.exists():
+                shutil.rmtree(path)
+                cleanup["removed"].append(path.name)
+        except Exception as exc:
+            cleanup["errors"].append({"path": str(path), "error": str(exc)})
+    return cleanup
+
+
 def assess_artifact(file_name, content_base64):
     data = base64.b64decode(content_base64)
     if not data:
@@ -2821,6 +3119,11 @@ def assess_artifact(file_name, content_base64):
     }
     archive = extract_artifact(artifact_path, extract_dir, artifact["type"], findings)
     files = walk_files(extract_dir, findings)
+    java_analysis = analyze_java_bytecode(artifact_path, extract_dir, files, artifact["type"])
+    add_java_analysis_findings(java_analysis, findings)
+    decompiled_dir = extract_dir / "_decompiled_java"
+    if decompiled_dir.exists():
+        files = walk_files(extract_dir, findings)
     secret_scan = scan_secrets(files, extract_dir, findings)
     certificate_scan = scan_certificates(files, extract_dir, findings)
     components = collect_dependency_inventory(files, extract_dir, findings)
@@ -2829,6 +3132,13 @@ def assess_artifact(file_name, content_base64):
     configuration_security = scan_configuration_security(files, extract_dir, findings)
     npm_audit = run_npm_audit_if_possible(extract_dir, findings)
     pip_audit = run_pip_audit_if_possible(extract_dir, findings)
+    trivy_scan = run_trivy_scan(extract_dir, artifact["type"])
+    dependency_check = run_dependency_check_scan(extract_dir, run_dir, artifact["type"])
+    external_vulnerabilities = dedupe_vulnerabilities(
+        (trivy_scan.get("vulnerabilities") or [])
+        + (dependency_check.get("vulnerabilities") or [])
+    )
+    add_external_vulnerability_findings(external_vulnerabilities, findings)
     raw_finding_total = len(findings)
     findings = sorted_security_findings(group_security_findings(findings))
     finding_counts = {}
@@ -2846,6 +3156,10 @@ def assess_artifact(file_name, content_base64):
         "configurationSecurity": configuration_security,
         "npmAudit": npm_audit,
         "pipAudit": pip_audit,
+        "trivyScan": trivy_scan,
+        "dependencyCheck": dependency_check,
+        "javaAnalysis": java_analysis,
+        "externalVulnerabilities": external_vulnerabilities,
         "components": components,
         "findings": findings,
         "findingCounts": finding_counts,
@@ -2853,8 +3167,9 @@ def assess_artifact(file_name, content_base64):
         "displayFindingTotal": len(findings),
         "decision": decision_for(findings),
     }
-    assessment["sbom"] = create_sbom(artifact, components)
+    assessment["sbom"] = create_sbom(artifact, components, external_vulnerabilities)
     assessment["reportCard"] = security_report_card(assessment)
+    assessment["llmStructuredReview"] = run_structured_security_llm(call_llm, redact_value, redact_text, assessment, files, extract_dir)
     assessment["llmReview"] = run_llm_review(assessment)
     assessment["reportMarkdown"] = build_markdown_report(assessment)
     report_excel = build_xlsx_report(assessment)
@@ -2862,6 +3177,8 @@ def assess_artifact(file_name, content_base64):
     (run_dir / "report.json").write_text(json.dumps(redact_value(assessment), indent=2), encoding="utf-8")
     (run_dir / "sbom.json").write_text(json.dumps(assessment["sbom"], indent=2), encoding="utf-8")
     (run_dir / "report.xlsx").write_bytes(report_excel)
+    assessment["rawFileCleanup"] = cleanup_raw_run_files(upload_dir, extract_dir)
+    (run_dir / "report.json").write_text(json.dumps(redact_value(assessment), indent=2), encoding="utf-8")
     assessment["reportPath"] = str(run_dir / "report.md")
     assessment["jsonPath"] = str(run_dir / "report.json")
     assessment["sbomPath"] = str(run_dir / "sbom.json")
@@ -2945,6 +3262,12 @@ class Handler(SimpleHTTPRequestHandler):
                 "reportCard": result["reportCard"],
                 "npmAudit": result["npmAudit"],
                 "pipAudit": result["pipAudit"],
+                "trivyScan": result["trivyScan"],
+                "dependencyCheck": result["dependencyCheck"],
+                "javaAnalysis": result["javaAnalysis"],
+                "externalVulnerabilities": result["externalVulnerabilities"][:150],
+                "llmStructuredReview": result["llmStructuredReview"],
+                "rawFileCleanup": result["rawFileCleanup"],
                 "llmReview": result["llmReview"],
                 "reportMarkdown": result["reportMarkdown"],
                 "reportPath": result["reportPath"],

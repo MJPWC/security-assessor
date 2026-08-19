@@ -12,6 +12,11 @@ This is a Python MVP web app for assessing deployable application packages befor
 - License and packaged configuration security readiness checks.
 - `npm audit` for every package folder that has both `package.json` and `package-lock.json`, including nested frontend apps such as `client/`.
 - `pip-audit` for Python dependency manifests such as `requirements.txt` and `pyproject.toml` when the `pip-audit` command is installed.
+- Trivy filesystem scan for extracted artifacts when the `trivy` command is installed.
+- OWASP Dependency-Check scan for extracted Java/package evidence when `dependency-check` or `dependency-check.sh` is installed.
+- Java bytecode inventory for packaged `.class` files, with optional CFR decompilation when Java and `SECURITY_ASSESSOR_CFR_JAR` are configured.
+- Normalized external vulnerability records across supported scanners.
+- Structured LLM security review using redacted scanner findings plus selected critical file snippets.
 - CycloneDX-lite SBOM generation.
 - LLM security review using Security Assessor's local LLM configuration.
 - Optional LLM quality review using the same Security Assessor LLM configuration.
@@ -43,7 +48,7 @@ ANTHROPIC_API_BASE_URL=https://api.anthropic.com
 ANTHROPIC_MODEL=claude-3-7-sonnet-20250219
 ```
 
-Configured providers are tried dynamically in this order: `anthropic_gateway`, `anthropic`, `groq`, `openai`, `gemini`, `openrouter`.
+Configured providers are tried dynamically in this order: `anthropic_gateway`, `groq`, `openai`, `gemini`, `openrouter`, `anthropic`.
 
 The committed `.env` is a template. Local override files are ignored by Git.
 
@@ -78,6 +83,35 @@ Python vulnerability scanning is optional and requires `pip-audit` on the host:
 ```bash
 python3 -m pip install pip-audit
 ```
+
+External scanner integrations are optional. Install any tools you want the app
+to use:
+
+```bash
+trivy
+dependency-check
+java
+```
+
+For Java decompilation, download CFR and point the app at the jar:
+
+```env
+SECURITY_ASSESSOR_CFR_JAR=/path/to/cfr.jar
+```
+
+Useful timeout overrides:
+
+```env
+SECURITY_ASSESSOR_TRIVY_TIMEOUT_SECONDS=240
+SECURITY_ASSESSOR_DEPENDENCY_CHECK_TIMEOUT_SECONDS=420
+SECURITY_ASSESSOR_DECOMPILE_TIMEOUT_SECONDS=180
+SECURITY_ASSESSOR_DELETE_RAW_FILES_AFTER_RUN=true
+```
+
+When raw-file cleanup is enabled, the app keeps `report.md`, `report.json`,
+`report.xlsx`, `sbom.json`, and external scanner report outputs, but removes the
+uploaded artifact and extracted/decompiled working tree after the report is
+written.
 
 ## Output
 
