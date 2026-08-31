@@ -4,6 +4,7 @@ import io
 import json
 import os
 import re
+import shutil
 import tarfile
 import uuid
 import zipfile
@@ -24,6 +25,7 @@ MAX_LLM_QUALITY_FINDINGS = int(os.getenv("SECURITY_ASSESSOR_MAX_LLM_QUALITY_FIND
 MAX_LLM_QUALITY_SAMPLE_FILES = int(os.getenv("SECURITY_ASSESSOR_MAX_LLM_QUALITY_SAMPLE_FILES", "6"))
 MAX_LLM_QUALITY_SAMPLE_LINES = int(os.getenv("SECURITY_ASSESSOR_MAX_LLM_QUALITY_SAMPLE_LINES", "40"))
 MAX_LLM_QUALITY_SAMPLE_CHARS = int(os.getenv("SECURITY_ASSESSOR_MAX_LLM_QUALITY_SAMPLE_CHARS", "2500"))
+DELETE_RAW_FILES_AFTER_RUN = (os.getenv("SECURITY_ASSESSOR_DELETE_RAW_FILES_AFTER_RUN", "true") or "").strip().lower() not in {"0", "false", "no", "off"}
 # A build package should never legitimately contain the assessor's own prior
 # run output. If it does, the upload was likely packaged from this app's own
 # working directory without excluding output/ -- skip those entries instead
@@ -43,8 +45,8 @@ HEALTH_RE = re.compile(r"\b(health|healthcheck|readiness|liveness|actuator/healt
 VERSION_RE = re.compile(r"\b(version|implementation-version|revision|commit|build[-_]?time)\b", re.I)
 SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
 SEVERITY_SORT = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-QUALITY_SCORE_WEIGHTS = {"critical": 30, "high": 15, "medium": 3, "low": 0.25, "info": 0}
-QUALITY_SCORE_CAPS = {"critical": 90, "high": 60, "medium": 30, "low": 10, "info": 0}
+QUALITY_SCORE_WEIGHTS = {"critical": 30, "high": 15, "medium": 1, "low": 0.10, "info": 0}
+QUALITY_SCORE_CAPS = {"critical": 90, "high": 60, "medium": 20, "low": 5, "info": 0}
 SENSITIVE_TEXT_RE = re.compile(
     r"(sk-[A-Za-z0-9_-]{12,}|AKIA[0-9A-Z]{16}|Bearer\s+[A-Za-z0-9._~+/=-]{12,}|"
     r"(api[_-]?key|token|secret|password)\s*[:=]\s*['\"]?[^'\"\s,}]{6,})",
@@ -76,6 +78,26 @@ def detect_type(file_name):
     if lower.endswith(".whl"):
         return "python-wheel"
     return "source-file"
+
+
+def cleanup_raw_run_files(*paths):
+    cleanup = {
+        "enabled": DELETE_RAW_FILES_AFTER_RUN,
+        "removed": [],
+        "errors": [],
+    }
+    if not DELETE_RAW_FILES_AFTER_RUN:
+        return cleanup
+    for path in paths:
+        path = Path(path)
+        if not path.exists():
+            continue
+        try:
+            shutil.rmtree(path)
+            cleanup["removed"].append(path.name)
+        except OSError as exc:
+            cleanup["errors"].append({"path": str(path), "error": str(exc)})
+    return cleanup
 
 
 def is_safe_archive_entry(name):
@@ -903,6 +925,8 @@ def assess_quality(file_name, content_base64, runs_dir, llm_reviewer=None):
     (run_dir / "quality-report.md").write_text(result["reportMarkdown"], encoding="utf-8")
     (run_dir / "quality-report.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     (run_dir / "quality-report.xlsx").write_bytes(report_excel)
+    result["rawFileCleanup"] = cleanup_raw_run_files(upload_dir, extract_dir)
+    (run_dir / "quality-report.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     result["markdownPath"] = str(run_dir / "quality-report.md")
     result["jsonPath"] = str(run_dir / "quality-report.json")
     result["excelPath"] = str(run_dir / "quality-report.xlsx")

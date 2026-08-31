@@ -6,14 +6,17 @@ import io
 import json
 import math
 import os
+import ipaddress
 import re
 import shutil
+import socket
 import subprocess
 import tarfile
 import tempfile
 import time
 import traceback
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 import zipfile
@@ -64,7 +67,13 @@ TEXT_FILE_LIMIT_BYTES = int(os.getenv("SECURITY_ASSESSOR_TEXT_FILE_LIMIT_BYTES",
 MAX_WALK_FILES = int(os.getenv("SECURITY_ASSESSOR_MAX_WALK_FILES", "3000"))
 MAX_PROMPT_FILE_BYTES = int(os.getenv("SECURITY_ASSESSOR_MAX_PROMPT_FILE_BYTES", str(1024 * 1024)))
 MAX_PROMPTS_PER_RUN = int(os.getenv("SECURITY_ASSESSOR_MAX_PROMPTS_PER_RUN", "250"))
-DELETE_RAW_FILES_AFTER_RUN = (os.getenv("SECURITY_ASSESSOR_DELETE_RAW_FILES_AFTER_RUN") or "").strip().lower() in {"1", "true", "yes"}
+DELETE_RAW_FILES_AFTER_RUN = (os.getenv("SECURITY_ASSESSOR_DELETE_RAW_FILES_AFTER_RUN", "true") or "").strip().lower() not in {"0", "false", "no", "off"}
+RUN_RETENTION_HOURS = int(os.getenv("SECURITY_ASSESSOR_RUN_RETENTION_HOURS", "72"))
+GUARDRAIL_ALLOWED_HOSTS = {
+    item.strip().lower()
+    for item in os.getenv("SECURITY_ASSESSOR_GUARDRAIL_ALLOWED_HOSTS", "localhost,127.0.0.1,::1").split(",")
+    if item.strip()
+}
 # A build package should never legitimately contain the assessor's own run
 # output. If it does, it's a strong signal the upload was packaged from this
 # app's own working directory without excluding output/ -- which is exactly
@@ -235,6 +244,8 @@ MEDIA_TYPE_LITERAL_RE = re.compile(r"^[a-z][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*(?:;
 
 SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
 SEVERITY_SORT = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+SECURITY_SCORE_WEIGHTS = {"critical": 30, "high": 15, "medium": 1, "low": 0.10, "info": 0}
+SECURITY_SCORE_CAPS = {"critical": 90, "high": 60, "medium": 20, "low": 5, "info": 0}
 DEFAULT_BLOCK_SIGNALS = ["blocked", "warning", "not allowed", "restricted", "policy", "cannot comply", "i can't help", "unauthorized", "forbidden"]
 BLOCKING_HTTP_STATUSES = {400, 401, 403, 406, 409, 422, 429}
 DOCUMENTATION_OR_RULE_PATH_RE = re.compile(r"(?:^|/)(?:docs?|examples?|samples?|rulesets?|readme|changelog|release-notes?|.*\.md|.*\.txt)(?:/|$)", re.I)
@@ -298,6 +309,41 @@ def group_security_findings(findings):
 
 def safe_name(file_name):
     return re.sub(r"[^A-Za-z0-9._-]", "_", Path(file_name).name or "uploaded-artifact")
+
+
+def is_allowed_guardrail_address(host, address):
+    host = str(host or "").lower().strip("[]")
+    address_text = str(address or "").lower().strip("[]")
+    if "*" in GUARDRAIL_ALLOWED_HOSTS:
+        return True
+    if host in GUARDRAIL_ALLOWED_HOSTS or address_text in GUARDRAIL_ALLOWED_HOSTS:
+        return True
+    try:
+        ip = ipaddress.ip_address(address_text)
+    except ValueError:
+        return False
+    return any(str(ip) == allowed for allowed in GUARDRAIL_ALLOWED_HOSTS)
+
+
+def validate_guardrail_target_url(target_url):
+    parsed = urllib.parse.urlparse(target_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("Target app URL must be a valid http:// or https:// URL.")
+    hostname = parsed.hostname.lower()
+    try:
+        resolved = socket.getaddrinfo(hostname, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise ValueError(f"Target host could not be resolved: {hostname}") from exc
+    addresses = sorted({item[4][0] for item in resolved})
+    if not addresses:
+        raise ValueError(f"Target host could not be resolved: {hostname}")
+    if not all(is_allowed_guardrail_address(hostname, address) for address in addresses):
+        allowed = ", ".join(sorted(GUARDRAIL_ALLOWED_HOSTS)) or "none"
+        raise ValueError(
+            "Target app URL is not allowed by SECURITY_ASSESSOR_GUARDRAIL_ALLOWED_HOSTS. "
+            f"Host {hostname} resolved to {', '.join(addresses)}; allowed hosts/IPs: {allowed}."
+        )
+    return target_url
 
 
 def detect_artifact_type(file_name):
@@ -473,6 +519,40 @@ def walk_files(root_dir, findings=None):
             {"maxWalkFiles": MAX_WALK_FILES},
         )
     return files
+
+
+def is_macos_metadata_path(path):
+    parts = [part for part in Path(path).parts if part not in {"", "."}]
+    return any(part == "__MACOSX" or part == ".DS_Store" or part.startswith("._") for part in parts)
+
+
+def scan_artifact_hygiene(files, extract_dir, findings):
+    macos_metadata = []
+    for path in files:
+        try:
+            rel = path.relative_to(extract_dir).as_posix()
+        except ValueError:
+            rel = path.as_posix()
+        if is_macos_metadata_path(rel):
+            macos_metadata.append(rel)
+
+    if macos_metadata:
+        add_finding(
+            findings,
+            "low",
+            "Artifact hygiene",
+            "macOS metadata files were found in the deployable artifact.",
+            {
+                "count": len(macos_metadata),
+                "examples": macos_metadata[:20],
+                "recommendation": "Recreate the artifact with excludes for .DS_Store, ._* files, and __MACOSX directories.",
+            },
+        )
+
+    return {
+        "macosMetadataCount": len(macos_metadata),
+        "macosMetadataExamples": macos_metadata[:50],
+    }
 
 
 def should_read_as_text(file_path):
@@ -1482,6 +1562,23 @@ def decision_for(findings):
     return "Approved for dev deployment"
 
 
+def security_score_details(findings):
+    counts = {}
+    for item in findings:
+        severity = item.get("severity", "info")
+        counts[severity] = counts.get(severity, 0) + int(item.get("count", 1) or 1)
+    penalties = {}
+    for severity, count in counts.items():
+        weighted_penalty = count * SECURITY_SCORE_WEIGHTS.get(severity, 0)
+        penalties[severity] = min(weighted_penalty, SECURITY_SCORE_CAPS.get(severity, 0))
+    total_penalty = sum(penalties.values())
+    return {
+        "score": max(0, round(100 - total_penalty)),
+        "penalty": round(total_penalty, 2),
+        "penalties": penalties,
+    }
+
+
 def score_status(score):
     if score >= 90:
         return "Good"
@@ -2310,8 +2407,7 @@ def build_guardrail_xlsx(result):
 
 def run_guardrail_test(payload):
     target_url = str(payload.get("targetUrl") or "").strip().rstrip("/")
-    if not target_url.startswith(("http://", "https://")):
-        raise ValueError("Target app URL must start with http:// or https://")
+    target_url = validate_guardrail_target_url(target_url)
     body_template = str(payload.get("bodyTemplate") or '{"input":"{{prompt}}","apiName":"SecurityGuardrailTest","saveFiles":false}')
     if "{{prompt}}" not in body_template:
         raise ValueError("Request body template must contain {{prompt}}. Do not type a single prompt there; the assessor inserts each prompt from the prompt files.")
@@ -2478,6 +2574,7 @@ def build_markdown_report(assessment):
         f"- Type: {assessment['artifact']['type']}",
         f"- Size: {assessment['artifact']['sizeBytes']} bytes",
         f"- SHA-256: {assessment['artifact']['sha256']}",
+        f"- Security score: {assessment.get('score', 0)}/100",
         "",
         "## Checks Performed",
         "",
@@ -2496,15 +2593,18 @@ def build_markdown_report(assessment):
         f"| OWASP Dependency-Check | Runs Dependency-Check against extracted Java/package evidence when installed. | {'Completed' if assessment.get('dependencyCheck', {}).get('attempted') else 'Not installed'} |",
         f"| Java bytecode analysis | Inventories .class files and optionally decompiles JAR/WAR bytecode with CFR. | {'Completed' if assessment.get('javaAnalysis') else 'Not applicable'} |",
         "| SBOM generation | Generates a CycloneDX-lite JSON dependency inventory. | Completed |",
-        "| Structured LLM security review | Sends redacted findings plus selected critical file snippets to the configured backend LLM. | Completed |",
+        f"| Structured LLM security review | Sends redacted findings plus selected critical file snippets to the configured backend LLM. | {structured_llm_status(assessment.get('llmStructuredReview'))} |",
         "",
         "## Finding Summary",
         "",
-        "| Severity | Count |",
-        "| --- | ---: |",
+        "| Severity | Count | Penalty |",
+        "| --- | ---: | ---: |",
     ]
+    score_details = assessment.get("scoreDetails") or {}
+    penalties = score_details.get("penalties") or {}
     for severity in ["critical", "high", "medium", "low", "info"]:
-        lines.append(f"| {severity} | {assessment['findingCounts'].get(severity, 0)} |")
+        lines.append(f"| {severity} | {assessment['findingCounts'].get(severity, 0)} | {penalties.get(severity, 0)} |")
+    lines.append(f"| total | {assessment.get('findingTotal', 0)} | {score_details.get('penalty', 0)} |")
     secret_scan = assessment.get("secretScan") or {}
     lines.extend([
         "",
@@ -2915,12 +3015,23 @@ def structured_llm_rows(structured):
     return rows
 
 
+def structured_llm_status(structured):
+    structured = structured or {}
+    if structured.get("error"):
+        return "Unavailable"
+    if structured.get("summary") or structured.get("findings") or structured.get("vulnerabilities"):
+        return "Completed"
+    return "Not configured"
+
+
 def security_readiness_rows(assessment):
     dependency_risk = assessment.get("dependencyRisk") or {}
     license_review = assessment.get("licenseReview") or {}
     configuration_security = assessment.get("configurationSecurity") or {}
+    artifact_hygiene = assessment.get("artifactHygiene") or {}
     rows = [
         style_header(["Area", "Metric", "Value"]),
+        ["Artifact hygiene", "macOS metadata files", artifact_hygiene.get("macosMetadataCount", 0)],
         ["Dependency risk", "Unpinned/floating dependencies", dependency_risk.get("unpinnedCount", 0)],
         ["Dependency risk", "Snapshot dependencies", dependency_risk.get("snapshotCount", 0)],
         ["License risk", "License entries reviewed", license_review.get("licenseCount", 0)],
@@ -2933,6 +3044,8 @@ def security_readiness_rows(assessment):
         rows.append(["License evidence", item.get("file", ""), item.get("license", "")])
     for item in (configuration_security.get("configFiles") or [])[:50]:
         rows.append(["Config evidence", "File", item])
+    for item in (artifact_hygiene.get("macosMetadataExamples") or [])[:50]:
+        rows.append(["Artifact hygiene evidence", "macOS metadata file", item])
     return rows
 
 
@@ -2958,15 +3071,19 @@ def build_xlsx_report(assessment):
         ["Run ID", assessment["runId"]],
         ["Generated", assessment["generatedAt"]],
         ["Decision", assessment["decision"]],
+        ["Security score", assessment.get("score", 0)],
+        ["Score penalty", (assessment.get("scoreDetails") or {}).get("penalty", 0)],
         ["File", assessment["artifact"]["fileName"]],
         ["Type", assessment["artifact"]["type"]],
         ["Size bytes", assessment["artifact"]["sizeBytes"]],
         ["SHA-256", assessment["artifact"]["sha256"]],
         [],
-        style_header(["Severity", "Count"]),
+        style_header(["Severity", "Count", "Penalty"]),
     ]
+    score_details = assessment.get("scoreDetails") or {}
+    penalties = score_details.get("penalties") or {}
     for severity in ["critical", "high", "medium", "low", "info"]:
-        summary_rows.append([severity, assessment["findingCounts"].get(severity, 0)])
+        summary_rows.append([severity, assessment["findingCounts"].get(severity, 0), penalties.get(severity, 0)])
     secret_scan = assessment.get("secretScan") or {}
     summary_rows.extend([
         [],
@@ -2990,7 +3107,7 @@ def build_xlsx_report(assessment):
         ["Trivy", "Completed" if assessment.get("trivyScan", {}).get("attempted") else "Not installed"],
         ["OWASP Dependency-Check", "Completed" if assessment.get("dependencyCheck", {}).get("attempted") else "Not installed"],
         ["Java bytecode analysis", "Completed"],
-        ["Structured LLM security review", "Completed"],
+        ["Structured LLM security review", structured_llm_status(assessment.get("llmStructuredReview"))],
         ["SBOM generation", "Completed"],
     ])
     sheets = [
@@ -3092,6 +3209,31 @@ def cleanup_raw_run_files(upload_dir, extract_dir):
     return cleanup
 
 
+def cleanup_expired_runs(runs_dir=RUNS_DIR, retention_hours=RUN_RETENTION_HOURS):
+    summary = {
+        "enabled": retention_hours > 0,
+        "retentionHours": retention_hours,
+        "removed": [],
+        "errors": [],
+    }
+    if retention_hours <= 0:
+        return summary
+    runs_dir = Path(runs_dir)
+    if not runs_dir.exists():
+        return summary
+    cutoff = time.time() - (retention_hours * 3600)
+    for path in runs_dir.iterdir():
+        if not path.is_dir():
+            continue
+        try:
+            if path.stat().st_mtime < cutoff:
+                shutil.rmtree(path)
+                summary["removed"].append(path.name)
+        except OSError as exc:
+            summary["errors"].append({"path": str(path), "error": str(exc)})
+    return summary
+
+
 def assess_artifact(file_name, content_base64):
     data = base64.b64decode(content_base64)
     if not data:
@@ -3119,6 +3261,7 @@ def assess_artifact(file_name, content_base64):
     }
     archive = extract_artifact(artifact_path, extract_dir, artifact["type"], findings)
     files = walk_files(extract_dir, findings)
+    artifact_hygiene = scan_artifact_hygiene(files, extract_dir, findings)
     java_analysis = analyze_java_bytecode(artifact_path, extract_dir, files, artifact["type"])
     add_java_analysis_findings(java_analysis, findings)
     decompiled_dir = extract_dir / "_decompiled_java"
@@ -3141,6 +3284,8 @@ def assess_artifact(file_name, content_base64):
     add_external_vulnerability_findings(external_vulnerabilities, findings)
     raw_finding_total = len(findings)
     findings = sorted_security_findings(group_security_findings(findings))
+    score_details = security_score_details(findings)
+    score = score_details["score"]
     finding_counts = {}
     for item in findings:
         finding_counts[item["severity"]] = finding_counts.get(item["severity"], 0) + (item.get("count") or 1)
@@ -3149,6 +3294,7 @@ def assess_artifact(file_name, content_base64):
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "artifact": artifact,
         "archive": archive,
+        "artifactHygiene": artifact_hygiene,
         "secretScan": secret_scan,
         "certificateScan": certificate_scan,
         "dependencyRisk": dependency_risk,
@@ -3162,6 +3308,8 @@ def assess_artifact(file_name, content_base64):
         "externalVulnerabilities": external_vulnerabilities,
         "components": components,
         "findings": findings,
+        "score": score,
+        "scoreDetails": score_details,
         "findingCounts": finding_counts,
         "findingTotal": raw_finding_total,
         "displayFindingTotal": len(findings),
@@ -3190,25 +3338,33 @@ class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(PUBLIC_DIR), **kwargs)
 
+    def send_common_security_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Cache-Control", "no-store")
+
     def send_json(self, status, payload):
         body = json.dumps(redact_value(payload)).encode("utf-8")
         self.send_response(status)
+        self.send_common_security_headers()
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
     def do_POST(self):
-        if self.path not in {"/api/assess", "/api/guardrail-test", "/api/quality-assess", "/api/deployment-verdict"}:
+        route = urllib.parse.urlparse(self.path).path
+        if route not in {"/api/assess", "/api/guardrail-test", "/api/quality-assess", "/api/deployment-verdict"}:
             self.send_json(HTTPStatus.NOT_FOUND, {"error": "Route not found."})
             return
         try:
+            cleanup_expired_runs()
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
-            if self.path == "/api/deployment-verdict":
+            if route == "/api/deployment-verdict":
                 self.send_json(HTTPStatus.OK, build_deployment_verdict(payload))
                 return
-            if self.path == "/api/quality-assess":
+            if route == "/api/quality-assess":
                 llm_reviewer = run_quality_llm_review if payload.get("useLlmReview") else None
                 result = assess_quality(payload.get("fileName"), payload.get("contentBase64"), RUNS_DIR, llm_reviewer=llm_reviewer)
                 self.send_json(HTTPStatus.OK, {
@@ -3224,6 +3380,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "findings": result["findings"],
                     "metrics": result["metrics"],
                     "llmReview": result["llmReview"],
+                    "rawFileCleanup": result["rawFileCleanup"],
                     "llmStatus": llm_status(),
                     "reportMarkdown": result["reportMarkdown"],
                     "markdownPath": result["markdownPath"],
@@ -3231,7 +3388,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "excelPath": result["excelPath"],
                 })
                 return
-            if self.path == "/api/guardrail-test":
+            if route == "/api/guardrail-test":
                 result = run_guardrail_test(payload)
                 self.send_json(HTTPStatus.OK, {
                     "runId": result["runId"],
@@ -3249,6 +3406,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json(HTTPStatus.OK, {
                 "runId": result["runId"],
                 "decision": result["decision"],
+                "score": result["score"],
+                "scoreDetails": result["scoreDetails"],
                 "findingCounts": result["findingCounts"],
                 "findingTotal": result["findingTotal"],
                 "displayFindingTotal": result["displayFindingTotal"],
@@ -3277,24 +3436,26 @@ class Handler(SimpleHTTPRequestHandler):
             })
         except Exception as exc:
             traceback.print_exc()
-            if self.path == "/api/quality-assess":
+            if route == "/api/quality-assess":
                 label = "Quality Assessor"
-            elif self.path == "/api/deployment-verdict":
+            elif route == "/api/deployment-verdict":
                 label = "Deployment Verdict"
             else:
                 label = "Security Assessor"
             self.send_json(HTTPStatus.BAD_REQUEST, {
                 "error": f"{label} request failed: " + redact_text(str(exc)),
-                "route": self.path,
+                "route": route,
             })
 
     def do_GET(self):
         if self.path == "/.well-known/appspecific/com.chrome.devtools.json":
             self.send_response(HTTPStatus.NO_CONTENT)
+            self.send_common_security_headers()
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
-        match = re.match(r"^/api/reports/([^/]+)/(report\.md|report\.json|report\.xlsx|sbom\.json|guardrail-report\.md|guardrail-report\.json|guardrail-report\.xlsx|quality-report\.md|quality-report\.json|quality-report\.xlsx)$", self.path)
+        route = urllib.parse.urlparse(self.path).path
+        match = re.match(r"^/api/reports/([^/]+)/(report\.md|report\.json|report\.xlsx|sbom\.json|guardrail-report\.md|guardrail-report\.json|guardrail-report\.xlsx|quality-report\.md|quality-report\.json|quality-report\.xlsx)$", route)
         if match:
             run_id, file_name = match.groups()
             file_path = (RUNS_DIR / run_id / file_name).resolve()
@@ -3307,6 +3468,7 @@ class Handler(SimpleHTTPRequestHandler):
                     content_type = "text/markdown"
                 data = file_path.read_bytes()
                 self.send_response(HTTPStatus.OK)
+                self.send_common_security_headers()
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
@@ -3319,6 +3481,7 @@ class Handler(SimpleHTTPRequestHandler):
 
 def main():
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    cleanup_expired_runs()
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"Security assessor running at http://localhost:{PORT}")
     server.serve_forever()

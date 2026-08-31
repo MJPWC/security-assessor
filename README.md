@@ -106,12 +106,19 @@ SECURITY_ASSESSOR_TRIVY_TIMEOUT_SECONDS=240
 SECURITY_ASSESSOR_DEPENDENCY_CHECK_TIMEOUT_SECONDS=420
 SECURITY_ASSESSOR_DECOMPILE_TIMEOUT_SECONDS=180
 SECURITY_ASSESSOR_DELETE_RAW_FILES_AFTER_RUN=true
+SECURITY_ASSESSOR_RUN_RETENTION_HOURS=72
+SECURITY_ASSESSOR_GUARDRAIL_ALLOWED_HOSTS=localhost,127.0.0.1,::1
 ```
 
 When raw-file cleanup is enabled, the app keeps `report.md`, `report.json`,
 `report.xlsx`, `sbom.json`, and external scanner report outputs, but removes the
 uploaded artifact and extracted/decompiled working tree after the report is
-written.
+written. Set `SECURITY_ASSESSOR_DELETE_RAW_FILES_AFTER_RUN=false` only for local
+debugging.
+
+Guardrail runtime testing is localhost-only by default; add explicit hosts or IPs
+to `SECURITY_ASSESSOR_GUARDRAIL_ALLOWED_HOSTS` before testing a remote target.
+Use `*` only in a trusted local environment.
 
 ## Output
 

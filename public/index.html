@@ -659,6 +659,7 @@
         <button id="scan">Run Security Assessment</button>
         <div class="status" id="status">Select a Node.js, Python, JAR, WAR, ZIP, TAR, TGZ, or wheel package.</div>
         <div class="summary">
+          <div class="metric"><b id="security-score">0</b><span>Score</span></div>
           <div class="metric"><b id="critical">0</b><span>Critical</span></div>
           <div class="metric"><b id="high">0</b><span>High</span></div>
           <div class="metric"><b id="medium">0</b><span>Medium</span></div>
@@ -819,6 +820,7 @@ cannot comply</textarea>
         expectedSignals: document.getElementById('guardrail-signals')
       };
       const counters = {
+        score: document.getElementById('security-score'),
         critical: document.getElementById('critical'),
         high: document.getElementById('high'),
         medium: document.getElementById('medium'),
@@ -841,13 +843,20 @@ cannot comply</textarea>
       function restoreSecurityState() {
         if (!tabState.packageSecurity && !tabState.guardrail) {
           setDecision('No assessment yet');
+          counters.score.textContent = '0';
+          for (const key of Object.keys(counters)) {
+            if (key === 'score') continue;
+            counters[key].textContent = '0';
+          }
           renderLinks();
           renderGuardrailLinks();
           reportEl.innerHTML = `<div class="report-empty">${emptyReportText('security')}</div>`;
           return;
         }
         setDecision(combinedSecurityDecision());
+        counters.score.textContent = tabState.packageSecurity?.score || 0;
         for (const key of Object.keys(counters)) {
+          if (key === 'score') continue;
           counters[key].textContent = tabState.packageSecurity?.findingCounts?.[key] || 0;
         }
         renderLinks(tabState.packageSecurity?.runId);
@@ -1502,7 +1511,9 @@ cannot comply</textarea>
           const payload = await response.json();
           if (!response.ok) throw new Error(payload.error || 'Assessment failed.');
           setDecision(payload.decision);
+          counters.score.textContent = payload.score || 0;
           for (const key of Object.keys(counters)) {
+            if (key === 'score') continue;
             counters[key].textContent = payload.findingCounts?.[key] || 0;
           }
           tabState.packageSecurity = payload;
